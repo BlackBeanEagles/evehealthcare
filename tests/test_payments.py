@@ -89,6 +89,25 @@ class TestChargingABooking:
         assert response.status_code == 400
 
 
+class TestLiteralAssignmentPath:
+    """The brief names ``POST /payments/``; it is aliased at the root onto the
+    same view as ``/api/v1/payments/``."""
+
+    def test_post_payments_at_the_root_charges_the_booking(self, auth_client, booking):
+        response = auth_client.post(
+            "/payments/", {"booking": booking.reference, "outcome": "success"}
+        )
+
+        assert response.status_code == 201
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.CONFIRMED
+
+    def test_the_root_alias_enforces_authentication(self, api_client, booking):
+        response = api_client.post("/payments/", {"booking": booking.reference})
+
+        assert response.status_code == 401
+
+
 class TestRejectedCharges:
     def test_an_unknown_booking_reference_is_a_404(self, auth_client):
         response = auth_client.post(PAYMENTS, {"booking": "BKG-NOPE"})

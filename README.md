@@ -3,7 +3,7 @@
 A backend for booking diagnostic tests at partner centres and paying for them
 through a **simulated** payment provider with an **idempotent webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · 188 tests
+Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · 190 tests
 
 ---
 
@@ -416,7 +416,7 @@ apps/
   bookings/        Booking + audit trail; state machine in services.py
   payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
                    idempotent settlement, Celery tasks, ops commands
-tests/             188 tests
+tests/             190 tests
 docker/            entrypoint (wait for db → migrate → seed → run)
 ```
 
@@ -438,7 +438,7 @@ HTTP request, a Celery task or a management command without duplication.
 Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
 header) · Celery worker with retry + backoff for webhook processing · Docker and
 docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-188 tests at 94% coverage · structured JSON logging with request-id correlation ·
+190 tests at 94% coverage · structured JSON logging with request-id correlation ·
 pagination on every list · scoped rate limiting (login, payments, webhook) ·
 webhook retry handling and a reconciliation sweeper · a health endpoint · Django
 admin for back-office · GitHub Actions CI running the suite against Postgres.
@@ -448,7 +448,7 @@ admin for back-office · GitHub Actions CI running the suite against Postgres.
 ## Tests
 
 ```bash
-pytest                                  # 188 tests, in-memory SQLite
+pytest                                  # 190 tests, in-memory SQLite
 pytest --cov --cov-report=term-missing  # 94% coverage
 DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 ```
@@ -475,6 +475,8 @@ Everything is environment-driven (see `.env.example`). Notable knobs:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `DJANGO_DEBUG` | `true` | Local-dev default. Set `false` in any deployment: that switches on secure cookies, HSTS and JSON logs (`manage.py check --deploy` is then clean apart from the two opt-ins below) |
+| `SECURE_SSL_REDIRECT` / `SECURE_HSTS_PRELOAD` | `false` | Opt-in. TLS is normally terminated and redirected at the load balancer; preload is hard to undo |
 | `DATABASE_URL` | `postgresql://eve:eve@localhost:5432/eve_diagnostics` | `postgres://` or `sqlite://` |
 | `REDIS_URL` | *(unset)* | Unset → local-memory cache, so it runs without Redis |
 | `CELERY_BROKER_URL` | `REDIS_URL` | Unset → tasks run inline, still correct |

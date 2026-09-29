@@ -259,3 +259,8 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = "DENY"
+    # Off by default: TLS is usually terminated (and HTTP redirected) at the
+    # load balancer, and an in-app redirect would break plain-HTTP container
+    # healthchecks. Preload is opt-in because it is very hard to undo.
+    SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", False)
+    SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
