@@ -1,0 +1,6 @@
+# Keep LF in the working tree everywhere. The Docker entrypoint is executed by
+# /bin/sh inside the image, and a CRLF checkout on Windows breaks its shebang.
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
