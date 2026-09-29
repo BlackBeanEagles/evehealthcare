@@ -149,6 +149,54 @@ class TestCeleryTasks:
         booking.refresh_from_db()
         assert booking.status == BookingStatus.CONFIRMED
 
+    def test_with_a_broker_configured_the_event_is_queued_not_processed_inline(
+        self, settings, pending_payment, booking, monkeypatch
+    ):
+        """The production path: the request returns as soon as the delivery is
+        stored, and a worker settles it."""
+        from apps.payments import tasks
+
+        settings.CELERY_TASK_ALWAYS_EAGER = False
+        queued = []
+        monkeypatch.setattr(
+            tasks.process_webhook_event_task, "delay", lambda pk: queued.append(pk)
+        )
+        event_body = SimulatedPaymentGateway.build_event(
+            pending_payment, event_type="payment.succeeded"
+        )
+        event, _ = ingest_webhook_event(
+            event_id=event_body["id"], event_type=event_body["type"], payload=event_body
+        )
+
+        assert tasks.dispatch_webhook_event(event) == "queued"
+        assert queued == [event.pk]
+
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.PENDING  # the worker has not run yet
+
+    def test_a_dispatch_failure_marks_the_event_for_retry(
+        self, pending_payment, monkeypatch
+    ):
+        from apps.payments import services, tasks
+
+        monkeypatch.setattr(
+            services,
+            "apply_payment_outcome",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        event_body = SimulatedPaymentGateway.build_event(
+            pending_payment, event_type="payment.succeeded"
+        )
+        event, _ = ingest_webhook_event(
+            event_id=event_body["id"], event_type=event_body["type"], payload=event_body
+        )
+
+        assert tasks.dispatch_webhook_event(event) == "processing_failed"
+
+        event.refresh_from_db()
+        assert event.status == WebhookEventStatus.FAILED
+        assert "boom" in event.last_error
+
     def test_the_reconciliation_task_runs(self, pending_payment):
         from apps.payments.tasks import reconcile_stale_payments_task
 

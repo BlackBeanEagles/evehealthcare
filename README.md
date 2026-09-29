@@ -3,7 +3,7 @@
 A backend for booking diagnostic tests at partner centres and paying for them
 through a **simulated** payment provider with an **idempotent webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · 186 tests
+Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · 188 tests
 
 ---
 
@@ -416,7 +416,7 @@ apps/
   bookings/        Booking + audit trail; state machine in services.py
   payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
                    idempotent settlement, Celery tasks, ops commands
-tests/             186 tests
+tests/             188 tests
 docker/            entrypoint (wait for db → migrate → seed → run)
 ```
 
@@ -438,7 +438,7 @@ HTTP request, a Celery task or a management command without duplication.
 Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
 header) · Celery worker with retry + backoff for webhook processing · Docker and
 docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-186 tests at 94% coverage · structured JSON logging with request-id correlation ·
+188 tests at 94% coverage · structured JSON logging with request-id correlation ·
 pagination on every list · scoped rate limiting (login, payments, webhook) ·
 webhook retry handling and a reconciliation sweeper · a health endpoint · Django
 admin for back-office · GitHub Actions CI running the suite against Postgres.
@@ -448,7 +448,7 @@ admin for back-office · GitHub Actions CI running the suite against Postgres.
 ## Tests
 
 ```bash
-pytest                                  # 186 tests, in-memory SQLite
+pytest                                  # 188 tests, in-memory SQLite
 pytest --cov --cov-report=term-missing  # 94% coverage
 DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 ```
