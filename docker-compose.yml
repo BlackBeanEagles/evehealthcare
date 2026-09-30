@@ -3,6 +3,7 @@ name: eve-diagnostics
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-eve_diagnostics}
       POSTGRES_USER: ${POSTGRES_USER:-eve}
@@ -19,6 +20,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "no"]
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -29,6 +31,8 @@ services:
       retries: 10
 
   web:
+    # Come back after a crash or a host restart; `docker compose stop` still wins.
+    restart: unless-stopped
     build:
       context: .
       args:
@@ -59,6 +63,9 @@ services:
       start_period: 20s
 
   worker:
+    # The entrypoint gives up if the DB isn't reachable within 60 s; without a
+    # restart policy that left queued webhooks unprocessed until someone noticed.
+    restart: unless-stopped
     build:
       context: .
       args:
