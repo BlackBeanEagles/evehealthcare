@@ -51,3 +51,9 @@ REST_FRAMEWORK = {  # noqa: F405
 LOGGING["root"]["level"] = "CRITICAL"  # noqa: F405
 for _logger in LOGGING["loggers"].values():  # noqa: F405
     _logger["level"] = "CRITICAL"
+
+# The manifest storage needs `collectstatic` to have run; tests don't.
+STORAGES = {
+    **STORAGES,  # noqa: F405
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
