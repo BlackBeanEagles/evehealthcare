@@ -3,7 +3,7 @@
 A backend for booking diagnostic tests at partner centres and paying for them
 through a **simulated** payment provider with an **idempotent webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 196 tests
+Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 212 tests
 
 ---
 
@@ -140,6 +140,11 @@ three files under `frontend/`. It is a thin client over the documented API:
   `innerHTML`.
 - Hash routing. Stale responses from a page you already left are discarded
   rather than painted over the current one.
+- Static assets ship with content-hashed filenames (`app.01b3e510607d.js`)
+  plus gzip and brotli variants, so a deploy is never served stale from a
+  browser cache.
+- Logging in, rotating tokens or logging out in one tab applies to every open
+  tab.
 - Native `<dialog>` for modals, radio-group chips for day, slot, method and
   outcome selection, keyboard focus rings, `prefers-reduced-motion`
   respected, and a layout that works at phone width.
@@ -164,7 +169,7 @@ as aliases onto the same views.
 | --- | --- | --- | --- |
 | POST | `/api/v1/auth/signup/` | — | Create an account |
 | POST | `/api/v1/auth/login/` | — | Email + password → JWT pair |
-| POST | `/api/v1/auth/refresh/` | — | Refresh → new access token |
+| POST | `/api/v1/auth/refresh/` | — | Refresh → new pair (rotating, with a 30 s reuse window, see below) |
 | POST | `/api/v1/auth/logout/` | JWT | Blacklist a refresh token |
 | GET/PATCH | `/api/v1/auth/me/` | JWT | Read or update your profile |
 
@@ -414,6 +419,26 @@ to poke at it by hand.
 
 ---
 
+### Refresh-token rotation, and a bug found by using the app
+
+Refresh tokens rotate: each use returns a new pair and blacklists the old
+token. Clicking through the frontend exposed the classic race this creates.
+A page reloaded while a refresh was in flight: the server rotated the token,
+but the response never arrived (the server logged a broken pipe). The
+reloaded page then presented the old, now-blacklisted token and the patient
+was logged out. Two tabs refreshing at once fail the same way.
+
+The fix is a short **reuse window** (`JWT_REFRESH_REUSE_SECONDS`, default
+30). A token presented again within the window of being rotated gets back
+the pair it was already rotated to, instead of a 401. Outside the window,
+reuse is rejected as before. This is the "reuse interval" trade-off identity
+providers make: a replay inside a few seconds gets nothing the legitimate
+client didn't already receive. Both behaviours are tested, and the browser
+client also adopts tokens another tab has saved. The window relies on a
+shared cache (Redis under docker-compose) to hold across gunicorn workers.
+
+---
+
 ## Edge cases handled
 
 Each of these has at least one test.
@@ -421,7 +446,8 @@ Each of these has at least one test.
 **Auth** — duplicate email (case-insensitively); weak, mismatched or missing
 passwords; malformed email or phone; wrong password, unknown email and
 deactivated account all 401; a forged JWT; a blacklisted refresh token; a
-patient trying to set `is_staff` on themselves.
+patient trying to set `is_staff` on themselves; every invalid signup field
+reported in one response; a page reloading mid-refresh (see below).
 
 **Booking** — appointment in the past, inside the 30-minute lead window, beyond
 the 90-day horizon, or outside the centre's opening hours; an offering that is
@@ -466,7 +492,7 @@ apps/
   payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
                    idempotent settlement, Celery tasks, ops commands
 frontend/          single-page web app (index.html + static/app/{app.js,styles.css})
-tests/             196 tests
+tests/             212 tests
 docker/            entrypoint (wait for db → migrate → seed → run)
 ```
 
@@ -488,7 +514,7 @@ HTTP request, a Celery task or a management command without duplication.
 Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
 header) · Celery worker with retry + backoff for webhook processing · Docker and
 docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-196 tests at 94% coverage · structured JSON logging with request-id correlation ·
+212 tests at 94% coverage · structured JSON logging with request-id correlation ·
 pagination on every list · scoped rate limiting (login, payments, webhook) ·
 webhook retry handling and a reconciliation sweeper · a health endpoint · Django
 admin for back-office · GitHub Actions CI running the suite against Postgres.
@@ -498,7 +524,7 @@ admin for back-office · GitHub Actions CI running the suite against Postgres.
 ## Tests
 
 ```bash
-pytest                                  # 196 tests, in-memory SQLite
+pytest                                  # 212 tests, in-memory SQLite
 pytest --cov --cov-report=term-missing  # 94% coverage
 DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 ```
@@ -514,6 +540,7 @@ DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 | `test_management.py` | Commands and Celery tasks |
 | `test_ops.py` | Health, schema, request-id tracing, throttling, JSON logs |
 | `test_frontend.py` | The app shell at `/`, its static assets, and that it doesn't shadow the API |
+| `test_config.py` | `DATABASE_URL` parsing (incl. the absolute-path regression) and env helpers |
 
 Tests use real JWTs rather than `force_authenticate`, so the token path is
 exercised on every request.
