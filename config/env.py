@@ -58,9 +58,13 @@ def database_config(url: str) -> dict[str, Any]:
     scheme = parsed.scheme.replace("+psycopg2", "")
 
     if scheme == "sqlite":
-        # sqlite:///:memory:  ->  path "/:memory:"
-        name = parsed.path.lstrip("/") or ":memory:"
-        return {"ENGINE": "django.db.backends.sqlite3", "NAME": name}
+        # Strip exactly one slash, per the usual database-URL convention:
+        #   sqlite:///dev.db        -> dev.db        (relative)
+        #   sqlite:////tmp/dev.db   -> /tmp/dev.db   (absolute, POSIX)
+        #   sqlite:///C:/dev.db     -> C:/dev.db     (absolute, Windows)
+        #   sqlite:///:memory:      -> :memory:
+        path = parsed.path[1:] if parsed.path.startswith("/") else parsed.path
+        return {"ENGINE": "django.db.backends.sqlite3", "NAME": path or ":memory:"}
 
     if scheme not in {"postgres", "postgresql", "pgsql"}:
         raise ValueError(f"Unsupported DATABASE_URL scheme: {parsed.scheme!r}")
