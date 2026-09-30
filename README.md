@@ -3,7 +3,7 @@
 A backend for booking diagnostic tests at partner centres and paying for them
 through a **simulated** payment provider with an **idempotent webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · 190 tests
+Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 196 tests
 
 ---
 
@@ -11,6 +11,7 @@ Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · D
 
 - [Quick start](#quick-start)
 - [What it does](#what-it-does)
+- [Frontend](#frontend)
 - [API reference](#api-reference)
 - [Walk through the whole flow](#walk-through-the-whole-flow-copy-paste)
 - [Database design](#database-design)
@@ -35,6 +36,7 @@ docker compose up --build
 That starts Postgres, Redis, the API and a Celery worker; migrations run and
 the catalogue is seeded automatically on boot.
 
+- **App (frontend): <http://localhost:8000/>**
 - API: <http://localhost:8000/api/v1/>
 - Swagger UI: <http://localhost:8000/api/docs/>
 - Health: <http://localhost:8000/health/>
@@ -99,6 +101,53 @@ signup/login ──▶ browse catalogue ──▶ POST /bookings/  (PENDING, pri
              POST /payments/webhook/  ◀── provider callback ◀──────┘
              (re-asserts the outcome; replays change nothing)
 ```
+
+---
+
+## Frontend
+
+A light-theme web app served by Django at `/`, so `docker compose up` gives you
+the whole product at <http://localhost:8000/>. Log in with the demo patient
+(there is a one-click "Fill in" button) and walk the full flow:
+
+1. **Explore:** partner centres, filterable by city, plus a test search.
+2. **Compare:** pick a test and see every centre that offers it, cheapest
+   first, with the price spread drawn as a bar. This is the per-centre pricing
+   model made visible.
+3. **Book:** choose a day and a 30-minute slot inside the centre's opening
+   hours. Slots inside the 30-minute lead window are disabled.
+4. **Pay:** choose a method and the simulated outcome (approve, decline or
+   random). Each attempt carries its own `Idempotency-Key`, so a double-click
+   or a flaky retry can never charge twice. After a decline, "Try again" starts
+   a fresh attempt.
+5. **Track:** each booking shows its status, its full transition history
+   (who changed it: you, the payment, or the provider webhook) and every
+   payment attempt. You can cancel from there.
+
+**Design.** A warm paper background, ink for anything you read, and a palette
+of saturated abstract colours (coral, saffron, teal, lilac, sky). Every
+centre, test and booking gets a generated abstract artwork seeded from its
+identifier, so the same centre always has the same "face". Colour carries
+identity; it never carries the text.
+
+**Implementation.** Plain JavaScript with no framework and no build step, in
+three files under `frontend/`. It is a thin client over the documented API:
+
+- Same origin as the API, so no CORS configuration and no second container.
+- JWT access and refresh tokens. An expired access token is refreshed once,
+  transparently; logout blacklists the refresh token.
+- Every API string passes through an escaping helper before it reaches
+  `innerHTML`.
+- Hash routing. Stale responses from a page you already left are discarded
+  rather than painted over the current one.
+- Native `<dialog>` for modals, radio-group chips for day, slot, method and
+  outcome selection, keyboard focus rings, `prefers-reduced-motion`
+  respected, and a layout that works at phone width.
+
+What it deliberately does *not* do: the webhook needs the provider's HMAC
+secret, which must never ship to a browser, so the idempotency demo stays on
+the CLI (`send_test_webhook`). Tokens live in `localStorage`, which is fine for
+a demo; production would use httpOnly cookies. See the improvements list.
 
 ---
 
@@ -416,7 +465,8 @@ apps/
   bookings/        Booking + audit trail; state machine in services.py
   payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
                    idempotent settlement, Celery tasks, ops commands
-tests/             190 tests
+frontend/          single-page web app (index.html + static/app/{app.js,styles.css})
+tests/             196 tests
 docker/            entrypoint (wait for db → migrate → seed → run)
 ```
 
@@ -438,7 +488,7 @@ HTTP request, a Celery task or a management command without duplication.
 Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
 header) · Celery worker with retry + backoff for webhook processing · Docker and
 docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-190 tests at 94% coverage · structured JSON logging with request-id correlation ·
+196 tests at 94% coverage · structured JSON logging with request-id correlation ·
 pagination on every list · scoped rate limiting (login, payments, webhook) ·
 webhook retry handling and a reconciliation sweeper · a health endpoint · Django
 admin for back-office · GitHub Actions CI running the suite against Postgres.
@@ -448,7 +498,7 @@ admin for back-office · GitHub Actions CI running the suite against Postgres.
 ## Tests
 
 ```bash
-pytest                                  # 190 tests, in-memory SQLite
+pytest                                  # 196 tests, in-memory SQLite
 pytest --cov --cov-report=term-missing  # 94% coverage
 DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 ```
@@ -463,6 +513,7 @@ DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 | `test_state_machine.py` | All 16 transitions + every database constraint |
 | `test_management.py` | Commands and Celery tasks |
 | `test_ops.py` | Health, schema, request-id tracing, throttling, JSON logs |
+| `test_frontend.py` | The app shell at `/`, its static assets, and that it doesn't shadow the API |
 
 Tests use real JWTs rather than `force_authenticate`, so the token path is
 exercised on every request.
@@ -559,6 +610,12 @@ inline task execution. Behaviour is identical, only the timing differs.
   when rows are inserted while a client is paging.
 - Idempotency keys on booking creation too, not just payments.
 - A soft "reservation hold" so a slot is not lost while payment is in flight.
+
+**Frontend**
+- Move tokens from `localStorage` to httpOnly, SameSite cookies with CSRF
+  protection, so an XSS bug could not read a session.
+- Browser tests (Playwright) for the book-and-pay flow, and a real bundler
+  with TypeScript once the client grows past a demo.
 
 **Engineering hygiene**
 - Extend CI beyond the current workflow (`.github/workflows/ci.yml` already runs
