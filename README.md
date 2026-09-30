@@ -3,7 +3,7 @@
 A backend for booking diagnostic tests at partner centres and paying for them
 through a **simulated** payment provider with an **idempotent webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 212 tests
+Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 219 tests
 
 ---
 
@@ -409,6 +409,45 @@ exactly one `WebhookEvent`, exactly one `Payment`, exactly one
 the same outcome, a contradictory late event, and a success arriving *after* the
 patient cancelled.
 
+### Proven under real concurrency and a real outage
+
+The tests above prove the constraints exist. `tests/test_concurrency.py`
+proves they hold when requests genuinely collide. Each scenario releases 8
+threads, each with its own Postgres connection, at the same instant:
+
+| Scenario | Result |
+| --- | --- |
+| One webhook event delivered 8× in parallel | 1 processed, 7 duplicates, 1 booking transition |
+| 8 different events asserting the same outcome | 8 events stored, booking moves once |
+| Success and failure events racing | Exactly one wins; booking always agrees with the payment |
+| 8 parallel charges for one booking | 1 × 201, 7 × 409, one payment row |
+| 8 parallel retries with one `Idempotency-Key` | One payment; every caller gets it back (1 × 201, 7 × 200) |
+| 8 parallel bookings of one slot | 1 × 201, 7 × 409 |
+
+These run in CI on Postgres, and they are skipped on SQLite, which
+serialises writes and would pass without proving anything. They also found
+a bug. The `Idempotency-Key` was checked *before* taking the booking lock, so
+retries that waited on the lock got a 409 instead of the original payment.
+No money moved twice, but the idempotency contract was broken. The key is now
+re-checked under the lock.
+
+The full `docker compose` stack (Postgres, Redis, API, Celery worker) was
+also driven over HTTP, including a deliberate database outage. A webhook
+was queued, the database was stopped, and the worker was released into the
+outage. The attempt failed, a retry was scheduled with backoff, and the
+retry confirmed the booking seconds after the database returned. Getting
+there exposed two more real problems, both fixed:
+
+- **A DB outage killed the retry.** The task recorded the failure in the
+  database *before* scheduling the retry, so when the database was the thing
+  that was down, that bookkeeping raised and no retry was ever scheduled.
+  Recording is now best-effort and the retry always goes ahead (unit-tested).
+- **A dead worker stayed dead.** The worker exits if Postgres isn't reachable
+  at startup, and compose had no restart policy. Queued webhooks weren't
+  lost, because they sit in Redis and were processed the moment a worker came
+  back, but nothing brought one back. Every service now has
+  `restart: unless-stopped`.
+
 ### Webhook signature
 
 Deliveries are signed `X-Webhook-Signature: t=<unix>,v1=<hmac-sha256 of "<t>.<body>">`
@@ -492,7 +531,7 @@ apps/
   payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
                    idempotent settlement, Celery tasks, ops commands
 frontend/          single-page web app (index.html + static/app/{app.js,styles.css})
-tests/             212 tests
+tests/             219 tests
 docker/            entrypoint (wait for db → migrate → seed → run)
 ```
 
@@ -514,7 +553,7 @@ HTTP request, a Celery task or a management command without duplication.
 Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
 header) · Celery worker with retry + backoff for webhook processing · Docker and
 docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-212 tests at 94% coverage · structured JSON logging with request-id correlation ·
+219 tests at 94% coverage · structured JSON logging with request-id correlation ·
 pagination on every list · scoped rate limiting (login, payments, webhook) ·
 webhook retry handling and a reconciliation sweeper · a health endpoint · Django
 admin for back-office · GitHub Actions CI running the suite against Postgres.
@@ -524,9 +563,9 @@ admin for back-office · GitHub Actions CI running the suite against Postgres.
 ## Tests
 
 ```bash
-pytest                                  # 212 tests, in-memory SQLite
+pytest                                  # in-memory SQLite: 213 run, 6 concurrency tests skip
 pytest --cov --cov-report=term-missing  # 94% coverage
-DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
+DATABASE_URL=postgresql://… pytest      # all 219, including the parallel-request tests
 ```
 
 | File | Covers |
@@ -540,6 +579,7 @@ DATABASE_URL=postgresql://… pytest      # same suite, against Postgres
 | `test_management.py` | Commands and Celery tasks |
 | `test_ops.py` | Health, schema, request-id tracing, throttling, JSON logs |
 | `test_frontend.py` | The app shell at `/`, its static assets, and that it doesn't shadow the API |
+| `test_concurrency.py` | 8 parallel requests per scenario on Postgres: duplicate webhooks, racing outcomes, double charges, same-key retries, same-slot bookings |
 | `test_config.py` | `DATABASE_URL` parsing (incl. the absolute-path regression) and env helpers |
 
 Tests use real JWTs rather than `force_authenticate`, so the token path is
@@ -614,9 +654,8 @@ inline task execution. Behaviour is identical, only the timing differs.
   UPDATE SKIP LOCKED` to hand out concurrent bookings safely.
 - **Outbox pattern** for anything we send outward, so a webhook we *emit* has
   the same delivery guarantees as the ones we receive.
-- **Concurrency tests** driving real parallel requests against Postgres; the
-  current suite proves the constraints exist and the locking path runs, not that
-  N simultaneous callers behave (SQLite cannot demonstrate row locks).
+- **Load testing** (k6 or Locust). The concurrency tests prove correctness
+  under 8-way contention, not throughput or latency under sustained load.
 - **Provider reconciliation**: `reconcile_payments` currently fails a stuck
   payment after a timeout. It should first re-query the provider and only give
   up if the provider also has no record.
