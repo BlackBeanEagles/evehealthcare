@@ -13,10 +13,11 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
 )
 
-from apps.common.views import HealthView
+from apps.common.views import HealthView, PublicConfigView
 from apps.payments.views import PaymentViewSet, PaymentWebhookView
 
 api_v1 = [
+    path("config/", PublicConfigView.as_view(), name="config"),
     path("auth/", include("apps.accounts.urls")),
     path("", include("apps.catalog.urls")),
     path("", include("apps.bookings.urls")),

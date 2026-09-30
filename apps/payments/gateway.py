@@ -7,7 +7,9 @@ two methods, not rewriting the payment service.
 
 Outcomes are controllable. ``PAYMENT_DEFAULT_OUTCOME=random`` (the default)
 uses ``PAYMENT_SUCCESS_RATE``; a request may override it with
-``"outcome": "success" | "failure"``. Deterministic outcomes are what make
+``"outcome": "success" | "failure" | "pending"``. ``pending`` models an
+asynchronous confirmation (a UPI collect request, a 3-D Secure challenge):
+the provider accepts the charge and settles it later through the webhook. Deterministic outcomes are what make
 the test suite meaningful, and they let a reviewer exercise the failure path
 on demand rather than by retrying until the dice cooperate.
 """
@@ -26,8 +28,9 @@ from apps.payments.models import PaymentStatus
 
 OUTCOME_SUCCESS = "success"
 OUTCOME_FAILURE = "failure"
+OUTCOME_PENDING = "pending"
 OUTCOME_RANDOM = "random"
-VALID_OUTCOMES = (OUTCOME_SUCCESS, OUTCOME_FAILURE, OUTCOME_RANDOM)
+VALID_OUTCOMES = (OUTCOME_SUCCESS, OUTCOME_FAILURE, OUTCOME_PENDING, OUTCOME_RANDOM)
 
 #: Which payment status each webhook event type asserts.
 EVENT_TYPE_TO_STATUS: dict[str, str] = {
@@ -78,7 +81,7 @@ class SimulatedPaymentGateway:
         outcome = (requested or self.default_outcome or OUTCOME_RANDOM).lower()
         if outcome not in VALID_OUTCOMES:
             raise ValidationFailed(
-                "outcome must be one of: success, failure, random.",
+                "outcome must be one of: success, failure, pending, random.",
                 details={"outcome": requested, "allowed": list(VALID_OUTCOMES)},
             )
         if outcome == OUTCOME_RANDOM:
@@ -93,6 +96,22 @@ class SimulatedPaymentGateway:
         resolved = self.resolve_outcome(outcome)
         provider_reference = f"sim_pay_{uuid.uuid4().hex[:20]}"
         now = datetime.now(tz=timezone.utc).isoformat()
+
+        if resolved == OUTCOME_PENDING:
+            return GatewayResult(
+                provider_reference=provider_reference,
+                status=PaymentStatus.PENDING,
+                raw={
+                    "id": provider_reference,
+                    "status": "created",
+                    "amount": str(payment.amount),
+                    "currency": payment.currency,
+                    "method": payment.method,
+                    "awaiting": "customer approval; the outcome arrives by webhook",
+                    "created_at": now,
+                    "simulated": True,
+                },
+            )
 
         if resolved == OUTCOME_SUCCESS:
             return GatewayResult(

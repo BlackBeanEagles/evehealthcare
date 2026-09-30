@@ -174,15 +174,28 @@ def initiate_payment(
     )
 
     result = get_gateway().charge(payment=payment, outcome=outcome)
-    apply_payment_outcome(
-        payment,
-        result.status,
-        source=BookingStatusChange.Source.PAYMENT,
-        provider_reference=result.provider_reference,
-        failure_code=result.failure_code,
-        failure_reason=result.failure_reason,
-        provider_payload=result.raw,
-    )
+    if result.status == PaymentStatus.PENDING:
+        # Asynchronous confirmation: the provider accepted the charge and will
+        # call the webhook once the customer approves it. Keep the provider's
+        # reference so that callback can find this payment; nothing settles yet.
+        payment.provider_reference = result.provider_reference
+        payment.provider_payload = result.raw
+        payment.save(update_fields=["provider_reference", "provider_payload", "updated_at"])
+        logger.info(
+            "payment_awaiting_confirmation",
+            extra={"payment_reference": payment.reference,
+                   "provider_reference": result.provider_reference},
+        )
+    else:
+        apply_payment_outcome(
+            payment,
+            result.status,
+            source=BookingStatusChange.Source.PAYMENT,
+            provider_reference=result.provider_reference,
+            failure_code=result.failure_code,
+            failure_reason=result.failure_reason,
+            provider_payload=result.raw,
+        )
     payment.refresh_from_db()
     return payment, True
 
@@ -321,11 +334,17 @@ def ingest_webhook_event(
             )
         return event, True
     except IntegrityError:
+        # Count the redelivery (atomically, so parallel duplicates all land)
+        # without touching anything else about the event.
+        WebhookEvent.objects.filter(event_id=event_id).update(
+            delivery_count=F("delivery_count") + 1
+        )
         existing = WebhookEvent.objects.get(event_id=event_id)
         logger.info(
             "webhook_duplicate_ignored",
             extra={
                 "event_id": event_id,
+                "delivery_count": existing.delivery_count,
                 "original_status": existing.status,
                 "original_result": existing.result,
             },

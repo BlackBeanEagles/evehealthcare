@@ -137,6 +137,11 @@ class WebhookEvent(models.Model):
         default=WebhookEventStatus.RECEIVED, db_index=True,
     )
     attempts = models.PositiveSmallIntegerField(default=0)
+    delivery_count = models.PositiveIntegerField(
+        default=1,
+        help_text="How many times the provider delivered this event. A "
+        "redelivery increments this; it is never processed again.",
+    )
     result = models.CharField(max_length=255, blank=True)
     last_error = models.TextField(blank=True)
     received_at = models.DateTimeField(auto_now_add=True, db_index=True)

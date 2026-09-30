@@ -4,7 +4,7 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from apps.payments.gateway import VALID_OUTCOMES
-from apps.payments.models import Payment, PaymentMethod
+from apps.payments.models import Payment, PaymentMethod, WebhookEvent
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -15,7 +15,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             "reference", "booking", "booking_status", "amount", "currency",
-            "status", "method", "provider_reference",
+            "status", "method", "provider_reference", "idempotency_key",
             "failure_code", "failure_reason", "processed_at", "created_at",
         ]
         read_only_fields = fields
@@ -32,8 +32,9 @@ class PaymentCreateSerializer(serializers.Serializer):
         choices=[(value, value) for value in VALID_OUTCOMES],
         required=False,
         help_text=(
-            "Simulation control. 'success' or 'failure' force the outcome; "
-            "omitted falls back to PAYMENT_DEFAULT_OUTCOME (random by default)."
+            "Simulation control. 'success' or 'failure' settle immediately; "
+            "'pending' leaves the payment awaiting a webhook (like a UPI "
+            "collect request); omitted falls back to PAYMENT_DEFAULT_OUTCOME."
         ),
     )
 
@@ -49,3 +50,46 @@ class WebhookAcknowledgementSerializer(serializers.Serializer):
     event_id = serializers.CharField()
     status = serializers.CharField()
     result = serializers.CharField()
+
+
+class WebhookEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WebhookEvent
+        fields = [
+            "event_id", "event_type", "status", "result",
+            "delivery_count", "attempts", "received_at", "processed_at",
+        ]
+        read_only_fields = fields
+
+
+class SimulateWebhookSerializer(serializers.Serializer):
+    EVENT_TYPES = {"success": "payment.succeeded", "failure": "payment.failed"}
+
+    outcome = serializers.ChoiceField(
+        choices=[("success", "success"), ("failure", "failure")],
+        help_text="Which outcome the simulated provider reports.",
+    )
+    deliveries = serializers.IntegerField(
+        min_value=1, max_value=5, default=3,
+        help_text="Deliver the same event this many times, as a provider "
+        "retrying on a timeout would.",
+    )
+
+
+class SimulatedDeliverySerializer(serializers.Serializer):
+    attempt = serializers.IntegerField()
+    http_status = serializers.IntegerField()
+    duplicate = serializers.BooleanField()
+    status = serializers.CharField()
+    result = serializers.CharField()
+
+
+class SimulationResultSerializer(serializers.Serializer):
+    """Documents the simulator response for the OpenAPI schema."""
+
+    event_id = serializers.CharField()
+    event_type = serializers.CharField()
+    deliveries = SimulatedDeliverySerializer(many=True)
+    booking_status_before = serializers.CharField()
+    booking_status_after = serializers.CharField()
+    payment = PaymentSerializer()

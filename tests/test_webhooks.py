@@ -258,8 +258,9 @@ class TestIdempotency:
         assert responses[0].json()["duplicate"] is False
         assert all(r.json()["duplicate"] is True for r in responses[1:])
 
-        # Exactly one of everything.
+        # Exactly one of everything, with every redelivery counted.
         assert WebhookEvent.objects.count() == 1
+        assert WebhookEvent.objects.get().delivery_count == 5
         assert Payment.objects.count() == 1
         assert booking.status_changes.filter(
             to_status=BookingStatus.CONFIRMED

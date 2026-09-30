@@ -1,6 +1,7 @@
 """Operational endpoints."""
 from __future__ import annotations
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db import connection
 from drf_spectacular.utils import extend_schema
@@ -51,3 +52,27 @@ class HealthView(APIView):
         except Exception as exc:  # pragma: no cover - failure path
             return f"error: {exc.__class__.__name__}"
         return "ok"
+
+
+class PublicConfigView(APIView):
+    """Public, non-secret settings the frontend needs.
+
+    Serving these instead of hard-coding them in the client means the booking
+    rules shown to a patient can never drift from the rules the API enforces.
+    """
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(tags=["ops"], summary="Client configuration", responses={200: dict}, auth=[])
+    def get(self, request: Request) -> Response:
+        return Response(
+            {
+                "currency": settings.PAYMENT_CURRENCY,
+                "payment_simulator": settings.PAYMENT_SIMULATOR_ENABLED,
+                "booking": {
+                    "min_lead_minutes": settings.BOOKING_MIN_LEAD_TIME_MINUTES,
+                    "max_advance_days": settings.BOOKING_MAX_ADVANCE_DAYS,
+                    "cancellation_cutoff_hours": settings.BOOKING_CANCELLATION_CUTOFF_HOURS,
+                },
+            }
+        )

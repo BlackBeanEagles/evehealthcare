@@ -47,16 +47,16 @@ class TestRequestTracing:
 
 
 class TestThrottling:
-    def test_login_attempts_are_rate_limited(self, api_client, user, settings):
+    def test_login_attempts_are_rate_limited(self, api_client, user, monkeypatch):
         from rest_framework.throttling import ScopedRateThrottle
 
-        settings.REST_FRAMEWORK = settings.REST_FRAMEWORK | {
-            "DEFAULT_THROTTLE_RATES": settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]
-            | {"auth": "3/min"}
-        }
-        ScopedRateThrottle.THROTTLE_RATES = settings.REST_FRAMEWORK[
-            "DEFAULT_THROTTLE_RATES"
-        ]
+        # monkeypatch restores the class attribute afterwards; assigning it
+        # directly would leak a 3/min login limit into every later test.
+        monkeypatch.setattr(
+            ScopedRateThrottle,
+            "THROTTLE_RATES",
+            {**ScopedRateThrottle.THROTTLE_RATES, "auth": "3/min"},
+        )
 
         url = reverse("v1:accounts:login")
         payload = {"email": user.email, "password": "wrong-password"}

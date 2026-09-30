@@ -99,6 +99,8 @@ class TestWebhookConcurrency:
         assert [r.status_code for r in responses] == [200] * PARALLEL
         assert sum(1 for r in responses if r.json()["duplicate"] is False) == 1
         assert WebhookEvent.objects.count() == 1
+        # The F()-expression increment means no parallel redelivery is lost.
+        assert WebhookEvent.objects.get().delivery_count == PARALLEL
         assert confirmations(booking) == 1
         booking.refresh_from_db()
         assert booking.status == BookingStatus.CONFIRMED
