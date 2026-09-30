@@ -26,7 +26,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://eve:eve@localhost:5432/eve_diagnostics
-      DJANGO_SECRET_KEY: ci-secret-key
+      # >= 32 bytes: it is also the JWT HMAC key (RFC 7518 §3.2); PyJWT warns below that.
+      DJANGO_SECRET_KEY: ci-only-secret-key-not-used-anywhere-else-0123456789
 
     steps:
       - uses: actions/checkout@v4
