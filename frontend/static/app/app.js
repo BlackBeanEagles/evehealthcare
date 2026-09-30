@@ -37,11 +37,21 @@ const PAYMENT_STATUS = {
 };
 
 const SOURCE_LABEL = {
-  api: "by you",
-  payment: "by the payment",
-  webhook: "by the provider webhook",
-  system: "by the system",
+  api: "You",
+  payment: "Payment gateway",
+  webhook: "Provider webhook",
+  system: "System",
 };
+
+/** Turn a stored transition reason into something a patient would say. */
+function humanReason(reason) {
+  return (reason || "")
+    .replace(/^Payment (\S+) success$/, "Payment $1 went through")
+    .replace(/^Payment (\S+) failed$/, "Payment $1 was declined")
+    .replace(/^Booking created$/, "Slot reserved")
+    .replace(/^Cancelled by patient$/, "Cancelled")
+    .replace(/^New payment attempt started$/, "Trying payment again");
+}
 
 const METHODS = [
   ["UPI", "UPI"],
@@ -60,8 +70,16 @@ const modal = $("#modal");
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const money = (value, currency = "INR") =>
-  new Intl.NumberFormat("en-IN", { style: "currency", currency, maximumFractionDigits: 2 }).format(Number(value));
+const money = (value, currency = "INR") => {
+  const n = Number(value);
+  const whole = Number.isInteger(n);
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency,
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(n);
+};
 
 const fmtDate = (iso) =>
   new Intl.DateTimeFormat("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" }).format(new Date(iso));
@@ -123,12 +141,18 @@ function colorFor(seed) {
   return PALETTE[hashString(String(seed)) % PALETTE.length];
 }
 
-function art(seed, { w = 400, h = 240, busy = 1 } = {}) {
+const TONES = {
+  success: { colors: ["#1A9E8F", "#7BC47F", "#4FB7F0", "#8C7BFF", "#1A9E8F"], ground: "#EAF7F4" },
+  failure: { colors: ["#FF6B57", "#FFB23F", "#FF8FB1", "#FF6B57", "#FFB23F"], ground: "#FFF1EC" },
+};
+
+function art(seed, { w = 400, h = 240, busy = 1, tone = null } = {}) {
   const r = seeded(seed);
   const pick = (arr) => arr[Math.floor(r() * arr.length)];
   const between = (a, b) => a + r() * (b - a);
-  const colors = [...PALETTE].sort(() => r() - 0.5);
-  const ground = pick(GROUNDS);
+  const toned = tone && TONES[tone];
+  const colors = toned ? [...toned.colors].sort(() => r() - 0.5) : [...PALETTE].sort(() => r() - 0.5);
+  const ground = toned ? toned.ground : pick(GROUNDS);
   const s = Math.min(w, h);
   const parts = [`<rect width="${w}" height="${h}" fill="${ground}"/>`];
 
@@ -167,8 +191,8 @@ function art(seed, { w = 400, h = 240, busy = 1 } = {}) {
     );
   }
 
-  // 5. a squiggle in ink
-  {
+  // 5. a squiggle in ink (dropped at icon size, where it reads as noise)
+  if (busy >= 0.5) {
     const y0 = between(h * 0.15, h * 0.85);
     const amp = between(s * 0.04, s * 0.09);
     const len = between(w * 0.35, w * 0.7);
@@ -186,7 +210,7 @@ function art(seed, { w = 400, h = 240, busy = 1 } = {}) {
   }
 
   // 6. a dot grid
-  if (busy > 0.3 && r() > 0.3) {
+  if (busy >= 0.5 && r() > 0.3) {
     const gx = between(w * 0.05, w * 0.7);
     const gy = between(h * 0.05, h * 0.6);
     const gap = s * 0.055;
@@ -197,7 +221,7 @@ function art(seed, { w = 400, h = 240, busy = 1 } = {}) {
   }
 
   // 7. a small accent disc with an outline ring
-  {
+  if (busy >= 0.5 || r() > 0.5) {
     const cx = between(w * 0.1, w * 0.9);
     const cy = between(h * 0.1, h * 0.9);
     const rad = between(s * 0.05, s * 0.1);
@@ -205,6 +229,24 @@ function art(seed, { w = 400, h = 240, busy = 1 } = {}) {
     parts.push(
       `<circle cx="${cx + rad * 0.5}" cy="${cy - rad * 0.4}" r="${rad * 1.25}" fill="none" stroke="${INK}" stroke-width="${Math.max(1.5, s * 0.008)}"/>`
     );
+  }
+
+  // 8. Large canvases (login panel, hero) get a second layer so they never
+  //    read as one shape floating in an empty field.
+  if (w * h > 300000) {
+    const ringR = between(s * 0.18, s * 0.28);
+    parts.push(
+      `<circle cx="${between(w * 0.55, w * 0.95)}" cy="${between(h * 0.08, h * 0.35)}" r="${ringR}" fill="none" stroke="${colors[5 % colors.length]}" stroke-width="${ringR * 0.32}"/>`
+    );
+    const bw = between(s * 0.25, s * 0.4);
+    const x = between(w * 0.05, w * 0.4);
+    const y = between(h * 0.3, h * 0.55);
+    parts.push(
+      `<rect x="${x}" y="${y}" width="${bw}" height="${bw}" rx="${bw * 0.5}" fill="${colors[6 % colors.length]}" transform="rotate(${between(0, 45)} ${x + bw / 2} ${y + bw / 2})"/>`
+    );
+    const rad = between(s * 0.22, s * 0.34);
+    const cx = between(w * 0.3, w * 0.8);
+    parts.push(`<path d="M${cx - rad} 0 A ${rad} ${rad} 0 0 0 ${cx + rad} 0 Z" fill="${colors[2]}" opacity=".9"/>`);
   }
 
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">${parts.join("")}</svg>`;
@@ -227,13 +269,30 @@ const ICON = {
 
 /* ═════════════════════════════════ auth ══════════════════════════════════ */
 
-const auth = (() => {
+function readStoredAuth() {
   try {
     return JSON.parse(localStorage.getItem(AUTH_KEY)) || {};
   } catch {
     return {};
   }
-})();
+}
+
+const auth = readStoredAuth();
+
+/** Adopt whatever another tab last saved (it may have rotated the tokens). */
+function syncAuthFromStorage() {
+  const stored = readStoredAuth();
+  for (const key of Object.keys(auth)) delete auth[key];
+  Object.assign(auth, stored);
+}
+
+// Keep tabs in step: a login, token rotation or logout in one tab applies to all.
+window.addEventListener("storage", (e) => {
+  if (e.key !== AUTH_KEY && e.key !== null) return;
+  const wasIn = Boolean(auth.access);
+  syncAuthFromStorage();
+  if (wasIn !== Boolean(auth.access)) go(auth.access ? "#/" : "#/login");
+});
 
 function saveAuth(patch) {
   Object.assign(auth, patch);
@@ -268,6 +327,7 @@ class ApiError extends Error {
 let refreshInFlight = null;
 
 function refreshAccess() {
+  syncAuthFromStorage(); // another tab may already hold newer tokens
   if (!auth.refresh) return Promise.resolve(false);
   refreshInFlight ??= fetch(`${API}/auth/refresh/`, {
     method: "POST",
@@ -299,7 +359,13 @@ async function api(path, { method = "GET", body, headers = {}, authed = true } =
     throw new ApiError(0, { error: { message: "Can't reach the server. Check your connection." } });
   }
 
-  // An expired access token is refreshed once, transparently.
+  // An expired access token is refreshed once, transparently. If another tab
+  // refreshed in the meantime, just retry with the token it saved.
+  if (res.status === 401 && authed && !isRetry) {
+    const sent = auth.access;
+    syncAuthFromStorage();
+    if (auth.access && auth.access !== sent) return api(path, { method, body, headers, authed }, true);
+  }
   if (res.status === 401 && authed && !isRetry && auth.refresh) {
     if (await refreshAccess()) return api(path, { method, body, headers, authed }, true);
     clearAuth();
@@ -328,10 +394,21 @@ function cached(key, loader) {
 /* ═════════════════════════════ UI primitives ═════════════════════════════ */
 
 function toast(message, kind = "info") {
+  const host = $("#toasts");
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
   el.textContent = message;
-  $("#toasts").append(el);
+  host.append(el);
+  // A modal <dialog> sits in the browser's top layer, above everything else.
+  // Re-showing the popover puts the toasts above it (no-op where unsupported).
+  if (host.showPopover) {
+    try {
+      if (host.matches(":popover-open")) host.hidePopover();
+      host.showPopover();
+    } catch {
+      /* older browser: toasts simply render in normal flow */
+    }
+  }
   setTimeout(() => {
     el.classList.add("leaving");
     setTimeout(() => el.remove(), 220);
@@ -412,15 +489,35 @@ function openModal(html, { onClose = null } = {}) {
   return $(".modal-card", modal);
 }
 
+/**
+ * Every close goes through here and runs its follow-up synchronously.
+ * Relying on the dialog's async `close` event alone is not safe: some embedded
+ * webviews and background tabs never dispatch it, which left "View booking"
+ * closing the dialog without navigating anywhere.
+ */
 function closeModal() {
-  if (modal.open) modal.close();
+  if (!modal.open) return;
+  modal.close();
+  finishClose();
 }
 
-modal.addEventListener("close", () => {
+function finishClose() {
   const cb = onModalClose;
   onModalClose = null;
   modal.innerHTML = "";
   cb?.();
+}
+
+// Esc: take it over so it follows the same path as the close button.
+modal.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  closeModal();
+});
+// Anything else that closes the dialog (e.g. a <form method="dialog">).
+// The event can arrive late: if a new dialog has been opened since, it is
+// stale and must not wipe the new content or run the new dialog's callback.
+modal.addEventListener("close", () => {
+  if (!modal.open && modal.innerHTML) finishClose();
 });
 modal.addEventListener("click", (e) => {
   if (e.target === modal) closeModal(); // backdrop
@@ -795,7 +892,7 @@ async function exploreView({ token }) {
 
   const [centres, tests] = await Promise.all([
     api("/centres/?page_size=100"),
-    api("/tests/?page_size=8"),
+    api("/tests/?page_size=6"),
   ]);
   if (token !== renderToken) return;
 
@@ -934,7 +1031,7 @@ async function testDetailView({ params: [code], token }) {
           </div>
           ${
             rows.length
-              ? `<div style="text-align:right"><p class="eyebrow">From</p><p class="price xl">${money(min)}</p><p class="muted">at ${rows.length} centre${rows.length > 1 ? "s" : ""}</p></div>`
+              ? `<div class="price-block"><p class="eyebrow">From</p><p class="price xl">${money(min)}</p><p class="muted">at ${rows.length} centre${rows.length > 1 ? "s" : ""}</p></div>`
               : ""
           }
         </div>
@@ -1153,17 +1250,14 @@ async function openBookingModal({ offeringId, price, centre, test }) {
     ];
     $("#slots", card).innerHTML = groups
       .map(([label, test]) => {
-        const times = allSlots.filter(test);
+        const times = allSlots.filter(test).filter((t) => !tooSoon(day, t));
         if (!times.length) return "";
         return `
           <div class="slot-group">
             <span class="label">${label}</span>
             <div class="choices">
               ${times
-                .map((t) => {
-                  const off = tooSoon(day, t);
-                  return `<label class="choice"><input type="radio" name="time" value="${t}" ${off ? "disabled" : ""}><span>${to12h(t)}</span></label>`;
-                })
+                .map((t) => `<label class="choice"><input type="radio" name="time" value="${t}"><span>${to12h(t)}</span></label>`)
                 .join("")}
             </div>
           </div>`;
@@ -1282,7 +1376,7 @@ function openPayModal(booking, { onClose } = {}) {
       ${modalHead(ok ? "Payment received" : "Payment declined", p.reference)}
       <div class="modal-body">
         <div class="result">
-          <div class="result-art">${art(ok ? `ok-${p.reference}` : `fail-${p.reference}`, { w: 300, h: 300 })}</div>
+          <div class="result-art">${art(p.reference, { w: 300, h: 300, tone: ok ? "success" : "failure" })}</div>
           <h2>${ok ? "You're booked in." : "That didn't go through."}</h2>
           <p class="muted">${
             ok
@@ -1414,10 +1508,21 @@ async function bookingsView({ query, token }) {
     <div class="booking-list" id="booking-list">${skeletons(3, "row-sk")}</div>`
   );
 
-  const data = await api(`/bookings/?page_size=100${status ? `&status=${status}` : ""}`);
+  const data = await api(`/bookings/?page_size=100&ordering=scheduled_for${status ? `&status=${status}` : ""}`);
   if (token !== renderToken) return;
+
+  // Patients think in appointment dates, not booking dates: next appointment
+  // first, then past ones (most recent first) under their own heading.
+  const now = Date.now();
+  const upcoming = data.results.filter((b) => new Date(b.scheduled_for).getTime() >= now);
+  const past = data.results.filter((b) => new Date(b.scheduled_for).getTime() < now).reverse();
+  const group = (title, rows) =>
+    rows.length ? `<p class="eyebrow" style="margin:8px 0 2px">${title}</p>${rows.map(bookingRow).join("")}` : "";
+
   $("#booking-list").innerHTML = data.results.length
-    ? data.results.map(bookingRow).join("")
+    ? upcoming.length && past.length
+      ? group("Upcoming", upcoming) + group("Past", past)
+      : [...upcoming, ...past].map(bookingRow).join("")
     : empty(
         `no-bookings-${status}`,
         status ? "Nothing here" : "No bookings yet",
@@ -1457,7 +1562,7 @@ async function bookingDetailView({ params: [reference], token }) {
               <h1 style="font-size:clamp(1.6rem,3.5vw,2.3rem)">${esc(b.test.name)}</h1>
               <p class="muted"><a href="#/centres/${b.centre.id}">${esc(b.centre.name)}</a>, ${esc(b.centre.city)}</p>
             </div>
-            <div style="text-align:right">
+            <div class="price-block">
               <p class="price xl">${money(b.amount, b.currency)}</p>
               <span class="code">${esc(b.reference)}</span>
             </div>
@@ -1491,8 +1596,8 @@ async function bookingDetailView({ params: [reference], token }) {
               <li>
                 <span class="dot ${meta.cls}"></span>
                 <div class="what">${esc(meta.label)}</div>
-                <div class="why">${esc(c.reason || "")} <span class="muted">${esc(SOURCE_LABEL[c.source] ?? "")}</span></div>
-                <div class="when" title="${esc(fmtDateTime(c.created_at))}">${esc(fmtRelative(c.created_at))}</div>
+                ${c.reason ? `<div class="why">${esc(humanReason(c.reason))}</div>` : ""}
+                <div class="when" title="${esc(fmtDateTime(c.created_at))}">${esc(SOURCE_LABEL[c.source] ?? "")} · ${esc(fmtRelative(c.created_at))}</div>
               </li>`;
               })
               .join("")}

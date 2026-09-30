@@ -58,6 +58,8 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {
@@ -125,13 +127,17 @@ p { margin: 0; }
   position: fixed;
   inset: 0;
   z-index: -1;
+  contain: strict;
   overflow: hidden;
   pointer-events: none;
 }
-.blob { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .42; }
-.blob-a { width: 520px; height: 520px; background: var(--saffron); top: -220px; left: -160px; }
-.blob-b { width: 560px; height: 560px; background: var(--lilac); bottom: -260px; right: -180px; opacity: .3; }
-.blob-c { width: 360px; height: 360px; background: var(--teal); top: 38%; right: -200px; opacity: .18; }
+.blob { position: absolute; border-radius: 50%; }
+.blob-a { width: 760px; height: 760px; top: -380px; left: -300px;
+  background: radial-gradient(circle, rgba(255, 178, 63, .42) 0%, rgba(255, 178, 63, 0) 68%); }
+.blob-b { width: 820px; height: 820px; bottom: -420px; right: -320px;
+  background: radial-gradient(circle, rgba(140, 123, 255, .32) 0%, rgba(140, 123, 255, 0) 68%); }
+.blob-c { width: 560px; height: 560px; top: 34%; right: -300px;
+  background: radial-gradient(circle, rgba(26, 158, 143, .2) 0%, rgba(26, 158, 143, 0) 68%); }
 .ring {
   position: absolute;
   width: 240px; height: 240px;
@@ -159,9 +165,7 @@ p { margin: 0; }
   align-items: center;
   gap: 24px;
   padding: 14px var(--gutter);
-  background: rgba(251, 247, 241, .82);
-  backdrop-filter: saturate(1.4) blur(14px);
-  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  background: rgba(251, 247, 241, .94);
   border-bottom: 1px solid var(--line);
 }
 
@@ -425,7 +429,8 @@ textarea.input { min-height: 88px; resize: vertical; }
 .choice.tile small { font-weight: 500; font-size: .75rem; opacity: .7; }
 .choice.tile b { font-family: var(--font-display); font-size: 1.25rem; }
 
-.choices.scroll { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+.choices.scroll { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; min-height: max-content; }
+.choices.scroll .choice { flex: none; }
 
 /* filter tabs */
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -587,6 +592,9 @@ textarea.input { min-height: 88px; resize: vertical; }
 .banner-art svg { width: 100%; height: 100%; }
 .banner-body { padding: 24px 28px 28px; display: grid; gap: 14px; }
 .banner-top { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+/* Right-aligned beside the title; left-aligned once it wraps underneath. */
+.price-block { text-align: right; }
+@media (max-width: 640px) { .price-block { text-align: left; } }
 
 .callout {
   display: flex;
@@ -804,7 +812,7 @@ table.list .t-name { font-weight: 700; }
   box-shadow: 10px 10px 0 var(--ink);
   overflow: hidden;
 }
-.modal::backdrop { background: rgba(28, 26, 46, .38); backdrop-filter: blur(3px); }
+.modal::backdrop { background: rgba(28, 26, 46, .42); }
 .modal[open] { animation: pop .22s cubic-bezier(.2, .9, .3, 1.2); }
 @keyframes pop { from { opacity: 0; transform: translateY(12px) scale(.98); } }
 
@@ -817,7 +825,8 @@ table.list .t-name { font-weight: 700; }
   padding: 22px 24px 0;
 }
 .modal-head h2 { font-size: 1.5rem; }
-.modal-body { padding: 20px 24px; overflow-y: auto; display: grid; gap: 20px; }
+.modal-body { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; flex: 1 1 auto; min-height: 0; }
+.modal-body > * { flex-shrink: 0; }
 .modal-foot {
   display: flex;
   justify-content: space-between;
@@ -915,6 +924,16 @@ table.list .t-name { font-weight: 700; }
 .empty .empty-art svg { width: 100%; height: 100%; }
 .empty p { color: var(--ink-2); max-width: 44ch; }
 
+/* The host is a manual popover so it can sit above an open <dialog>; reset
+   the UA popover box (inset/margin/border/background) to our own layout. */
+.toasts[popover] {
+  /* The UA gives popovers inset:0 + margin:auto (centred); pin ours bottom-centre. */
+  inset: auto auto 24px 50%;
+  margin: 0; padding: 0; border: 0; background: transparent; overflow: visible; color: inherit;
+}
+/* Always rendered, even where the popover can't open: the UA hides a closed
+   popover with display:none, which would silently swallow every toast. */
+.toasts[popover] { display: grid; }
 .toasts {
   position: fixed;
   left: 50%;
