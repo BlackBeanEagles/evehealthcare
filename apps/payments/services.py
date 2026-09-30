@@ -58,6 +58,31 @@ class OutcomeResult:
 
 
 # --------------------------------------------------------------------- charging
+def _replay_for_key(idempotency_key: str | None, booking: Booking) -> Payment | None:
+    """The payment already made under this Idempotency-Key, if any.
+
+    A key belongs to one booking; presenting it for another is a client bug,
+    reported as a conflict rather than silently returning someone else's
+    payment.
+    """
+    if not idempotency_key:
+        return None
+    existing = Payment.objects.filter(idempotency_key=idempotency_key).first()
+    if existing is None:
+        return None
+    if existing.booking_id != booking.pk:
+        raise ConflictError(
+            "This Idempotency-Key was already used for a different booking.",
+            code="idempotency_key_reused",
+            details={"payment": existing.reference},
+        )
+    logger.info(
+        "payment_idempotent_replay",
+        extra={"payment_reference": existing.reference, "booking_reference": booking.reference},
+    )
+    return existing
+
+
 @transaction.atomic
 def initiate_payment(
     *,
@@ -71,25 +96,20 @@ def initiate_payment(
     Returns ``(payment, created)``. ``created=False`` means an
     ``Idempotency-Key`` replay returned the original payment untouched.
     """
-    if idempotency_key:
-        existing = Payment.objects.filter(idempotency_key=idempotency_key).first()
-        if existing is not None:
-            if existing.booking_id != booking.pk:
-                raise ConflictError(
-                    "This Idempotency-Key was already used for a different booking.",
-                    code="idempotency_key_reused",
-                    details={"payment": existing.reference},
-                )
-            logger.info(
-                "payment_idempotent_replay",
-                extra={"payment_reference": existing.reference,
-                       "booking_reference": booking.reference},
-            )
-            return existing, False
+    # Fast path: a plain retry after the original request finished.
+    if (existing := _replay_for_key(idempotency_key, booking)) is not None:
+        return existing, False
 
     # Re-read the booking under a row lock: two concurrent charge attempts for
     # the same booking must not both get past the checks below.
     booking = lock_rows(Booking.objects.filter(pk=booking.pk)).get()
+
+    # Check the key again now that we hold the lock. A parallel request with
+    # the same key may have committed its payment while this one waited; the
+    # client must get that payment back, not a 409. (Found by
+    # tests/test_concurrency.py: 7 of 8 simultaneous retries got 409.)
+    if (existing := _replay_for_key(idempotency_key, booking)) is not None:
+        return existing, False
 
     if booking.status == BookingStatus.CANCELLED:
         raise InvalidStateTransition(
@@ -134,11 +154,10 @@ def initiate_payment(
             status=PaymentStatus.PENDING,
         )
     except IntegrityError as exc:
-        # Lost a race on either unique index; surface the winner.
-        if idempotency_key:
-            existing = Payment.objects.filter(idempotency_key=idempotency_key).first()
-            if existing is not None:
-                return existing, False
+        # Lost a race on either unique index; surface the winner (or report a
+        # key that was used for a different booking).
+        if (existing := _replay_for_key(idempotency_key, booking)) is not None:
+            return existing, False
         raise ConflictError(
             "A payment for this booking is already in progress.",
             code="payment_in_progress",
