@@ -24,25 +24,44 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, acks_late=True, ignore_result=False)
 def process_webhook_event_task(self, event_pk: int) -> str:
-    """Process one stored webhook event, retrying transient failures."""
+    """Process one stored webhook event, retrying transient failures.
+
+    The most common transient failure is the database itself being briefly
+    unavailable, so nothing on the failure path may depend on it: loading the
+    event sits inside the retry handling, and recording the failure is
+    best-effort. Before this, a DB outage raised out of the bookkeeping and
+    the retry was never scheduled.
+    """
     try:
         event = WebhookEvent.objects.get(pk=event_pk)
-    except WebhookEvent.DoesNotExist:  # pragma: no cover - defensive
+        return process_webhook_event(event)
+    except WebhookEvent.DoesNotExist:
         logger.error("webhook_event_missing", extra={"event_pk": event_pk})
         return "missing"
-
-    try:
-        return process_webhook_event(event)
     except Exception as exc:
-        mark_webhook_failed(event, f"{exc.__class__.__name__}: {exc}")
+        _record_failure(event_pk, exc)
         countdown = settings.PAYMENT_WEBHOOK_RETRY_BACKOFF_SECONDS * (
             2 ** self.request.retries
+        )
+        logger.warning(
+            "webhook_retry_scheduled",
+            extra={"event_pk": event_pk, "attempt": self.request.retries + 1,
+                   "countdown_s": countdown, "error": str(exc)},
         )
         raise self.retry(
             exc=exc,
             countdown=countdown,
             max_retries=settings.PAYMENT_WEBHOOK_MAX_RETRIES,
         )
+
+
+def _record_failure(event_pk: int, exc: Exception) -> None:
+    """Mark the event FAILED if the database will let us; never raise."""
+    try:
+        event = WebhookEvent.objects.only("pk", "event_id").get(pk=event_pk)
+        mark_webhook_failed(event, f"{exc.__class__.__name__}: {exc}")
+    except Exception:
+        logger.exception("webhook_failure_not_recorded", extra={"event_pk": event_pk})
 
 
 @shared_task

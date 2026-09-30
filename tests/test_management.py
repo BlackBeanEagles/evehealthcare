@@ -197,6 +197,43 @@ class TestCeleryTasks:
         assert event.status == WebhookEventStatus.FAILED
         assert "boom" in event.last_error
 
+    def test_a_database_outage_still_schedules_a_retry(self, pending_payment, monkeypatch):
+        """When the database is what's down, recording the failure fails too.
+        That bookkeeping error must not swallow the retry, or a transient
+        outage silently turns into a webhook that is never processed."""
+        from django.db import OperationalError
+
+        from apps.payments import tasks
+
+        event_body = SimulatedPaymentGateway.build_event(
+            pending_payment, event_type="payment.succeeded"
+        )
+        event, _ = ingest_webhook_event(
+            event_id=event_body["id"], event_type=event_body["type"], payload=event_body
+        )
+
+        def db_down(*args, **kwargs):
+            raise OperationalError("could not connect to server")
+
+        class RetryScheduled(Exception):
+            pass
+
+        scheduled = {}
+
+        def fake_retry(exc=None, countdown=None, max_retries=None, **kwargs):
+            scheduled.update(exc=exc, countdown=countdown, max_retries=max_retries)
+            return RetryScheduled()
+
+        monkeypatch.setattr(tasks, "process_webhook_event", db_down)
+        monkeypatch.setattr(tasks, "mark_webhook_failed", db_down)
+        monkeypatch.setattr(tasks.process_webhook_event_task, "retry", fake_retry)
+
+        with pytest.raises(RetryScheduled):
+            tasks.process_webhook_event_task(event.pk)
+
+        assert isinstance(scheduled["exc"], OperationalError)
+        assert scheduled["countdown"] > 0
+
     def test_the_reconciliation_task_runs(self, pending_payment):
         from apps.payments.tasks import reconcile_stale_payments_task
 
