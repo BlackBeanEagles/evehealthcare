@@ -1,14 +1,17 @@
 """Authentication serializers."""
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
@@ -33,6 +36,10 @@ class SignupSerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "email", "full_name", "phone", "password", "password_confirm"]
         read_only_fields = ["id"]
+        # The model's automatic UniqueValidator is case-sensitive and words its
+        # error as "user with this email already exists."; validate_email
+        # below replaces it with a case-insensitive check and a clearer message.
+        extra_kwargs = {"email": {"validators": []}}
 
     def validate_email(self, value: str) -> str:
         normalised = value.strip().lower()
@@ -48,14 +55,22 @@ class SignupSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Enter your full name.")
         return cleaned
 
+    def validate_password(self, value: str) -> str:
+        # Field-level, so a weak password is reported in the same response as
+        # any other field error rather than only after everything else passes.
+        candidate = User(
+            email=str(self.initial_data.get("email", "")),
+            full_name=str(self.initial_data.get("full_name", "")),
+        )
+        try:
+            validate_password(value, user=candidate)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages)) from exc
+        return value
+
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         if attrs["password"] != attrs.pop("password_confirm"):
             raise serializers.ValidationError({"password_confirm": "Passwords do not match."})
-        candidate = User(email=attrs["email"], full_name=attrs.get("full_name", ""))
-        try:
-            validate_password(attrs["password"], user=candidate)
-        except DjangoValidationError as exc:
-            raise serializers.ValidationError({"password": list(exc.messages)}) from exc
         return attrs
 
     def create(self, validated_data: dict[str, Any]) -> Any:
@@ -99,3 +114,36 @@ class LogoutSerializer(serializers.Serializer):
         # Blacklisting makes logout meaningful: the refresh token cannot be
         # exchanged for a new access token afterwards.
         self.token.blacklist()
+
+
+class RefreshSerializer(TokenRefreshSerializer):
+    """Token refresh with a short reuse window.
+
+    Refresh tokens rotate: each use returns a new pair and blacklists the old
+    token. On its own that races badly with real browsers. If a page reloads
+    while a refresh is in flight, the server rotates the token but the
+    response is never received, so the reloaded page presents the old,
+    now-blacklisted token and the user is logged out. Two tabs refreshing at
+    once hit the same wall.
+
+    So a token presented again within ``JWT_REFRESH_REUSE_SECONDS`` of being
+    rotated gets the *same* pair it was rotated to, instead of a 401. After
+    the window, reuse is rejected as before. This is the "reuse interval"
+    trade-off identity providers make: a replay inside a few seconds yields
+    nothing the legitimate client didn't already receive.
+
+    The cache must be shared across processes (Redis in docker-compose) for
+    the window to hold between gunicorn workers.
+    """
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        window = settings.JWT_REFRESH_REUSE_SECONDS
+        key = "jwt:rotated:" + hashlib.sha256(attrs["refresh"].encode()).hexdigest()
+        if window > 0:
+            previous = cache.get(key)
+            if previous is not None:
+                return previous
+        data = super().validate(attrs)
+        if window > 0:
+            cache.set(key, data, window)
+        return data

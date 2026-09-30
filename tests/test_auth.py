@@ -46,6 +46,21 @@ class TestSignup:
 
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "validation_error"
+        assert response.json()["error"]["details"]["email"] == [
+            "An account with this email already exists."
+        ]
+
+    def test_reports_every_invalid_field_in_one_response(self, api_client):
+        """A duplicate email must not hide a weak password: both come back
+        together so the user fixes the form in one pass."""
+        UserFactory(email="asha.menon@example.com")
+
+        response = api_client.post(
+            SIGNUP, VALID_SIGNUP | {"password": "password", "password_confirm": "password"}
+        )
+
+        details = response.json()["error"]["details"]
+        assert {"email", "password"} <= set(details)
 
     def test_rejects_mismatched_passwords(self, api_client):
         payload = VALID_SIGNUP | {"password_confirm": "SomethingElse1!"}
@@ -143,6 +158,34 @@ class TestRefreshAndLogout:
 
         # The blacklisted token can no longer be exchanged.
         assert api_client.post(REFRESH, {"refresh": tokens["refresh"]}).status_code == 401
+
+    def test_a_just_rotated_token_replayed_inside_the_window_gets_the_same_pair(
+        self, api_client, user
+    ):
+        """The race found in the browser: a page reloads mid-refresh, never
+        receives the rotated pair, and retries with the old token. That must
+        not log the user out."""
+        refresh = api_client.post(
+            LOGIN, {"email": user.email, "password": DEFAULT_PASSWORD}
+        ).json()["refresh"]
+
+        first = api_client.post(REFRESH, {"refresh": refresh})
+        replay = api_client.post(REFRESH, {"refresh": refresh})
+
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert replay.json() == first.json()  # the same pair, not a second one
+
+    def test_outside_the_window_a_rotated_token_is_rejected(
+        self, api_client, user, settings
+    ):
+        settings.JWT_REFRESH_REUSE_SECONDS = 0
+        refresh = api_client.post(
+            LOGIN, {"email": user.email, "password": DEFAULT_PASSWORD}
+        ).json()["refresh"]
+
+        assert api_client.post(REFRESH, {"refresh": refresh}).status_code == 200
+        assert api_client.post(REFRESH, {"refresh": refresh}).status_code == 401
 
     def test_logout_rejects_a_garbage_token(self, auth_client):
         response = auth_client.post(LOGOUT, {"refresh": "not-a-token"})

@@ -15,6 +15,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from apps.accounts.serializers import (
     LoginSerializer,
     LogoutSerializer,
+    RefreshSerializer,
     SignupSerializer,
     UserSerializer,
 )
@@ -79,6 +80,7 @@ class LoginView(generics.GenericAPIView):
 
 @extend_schema(tags=["auth"], summary="Exchange a refresh token for a new access token")
 class RefreshView(TokenRefreshView):
+    serializer_class = RefreshSerializer
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"

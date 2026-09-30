@@ -161,6 +161,9 @@ SIMPLE_JWT = {
     "USER_ID_CLAIM": "user_id",
     "SIGNING_KEY": env("JWT_SIGNING_KEY", SECRET_KEY),
 }
+# A just-rotated refresh token presented again inside this window gets the
+# same new pair instead of a 401 (reload mid-refresh, two tabs). 0 disables.
+JWT_REFRESH_REUSE_SECONDS = env_int("JWT_REFRESH_REUSE_SECONDS", 30)
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "EVE Healthcare - Diagnostics Booking API",
