@@ -8,7 +8,17 @@
 
 const API = "/api/v1";
 const AUTH_KEY = "eve.auth";
-const LEAD_MINUTES = 30; // mirrors BOOKING_MIN_LEAD_TIME_MINUTES; the server re-validates
+
+/**
+ * Non-secret server settings, loaded from GET /config/ at boot so the rules
+ * shown to a patient can't drift from the rules the API enforces. These
+ * defaults only apply if that request fails; the server re-validates anyway.
+ */
+let CONFIG = {
+  currency: "INR",
+  payment_simulator: false,
+  booking: { min_lead_minutes: 30, max_advance_days: 90, cancellation_cutoff_hours: 2 },
+};
 
 const PALETTE = ["#FF6B57", "#FFB23F", "#1A9E8F", "#8C7BFF", "#4FB7F0", "#FF8FB1", "#7BC47F"];
 const GROUNDS = ["#FFF4E6", "#EAF7F4", "#F0EDFF", "#E7F4FC", "#FFEFF3", "#F6F1E7"];
@@ -265,6 +275,9 @@ const ICON = {
   back: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>`,
   arrow: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>`,
   shield: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6z"/></svg>`,
+  compass: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>`,
+  calendar: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg>`,
+  card: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5.5" width="18" height="13" rx="3"/><path d="M3 10h18M7 15h4"/></svg>`,
 };
 
 /* ═════════════════════════════════ auth ══════════════════════════════════ */
@@ -612,20 +625,24 @@ function renderTopbar(path) {
     .slice(0, 2)
     .join("")
     .toUpperCase();
+  // [href, label, short label for the phone tab bar, icon, is-active]
   const links = [
-    ["#/", "Explore", (p) => p === "#/" || p === "#" || p.startsWith("#/centres")],
-    ["#/tests", "Tests", (p) => p.startsWith("#/tests")],
-    ["#/bookings", "My bookings", (p) => p.startsWith("#/bookings")],
-    ["#/payments", "Payments", (p) => p.startsWith("#/payments")],
+    ["#/", "Explore", "Explore", ICON.compass, (p) => p === "#/" || p === "#" || p.startsWith("#/centres")],
+    ["#/tests", "Tests", "Tests", ICON.flask, (p) => p.startsWith("#/tests")],
+    ["#/bookings", "My bookings", "Bookings", ICON.calendar, (p) => p.startsWith("#/bookings")],
+    ["#/payments", "Payments", "Payments", ICON.card, (p) => p.startsWith("#/payments")],
   ];
   bar.hidden = false;
+  // On phones .nav becomes a bottom tab bar (see styles.css), so all four
+  // destinations stay visible instead of scrolling off the edge.
   bar.innerHTML = `
     <a class="brand" href="#/">${LOGO}<span>EVE <em>Diagnostics</em></span></a>
     <nav class="nav" aria-label="Main">
       ${links
-        .map(([href, label, active]) => {
+        .map(([href, label, short, icon, active]) => {
           const on = active(path);
-          return `<a href="${href}" class="${on ? "active" : ""}" ${on ? 'aria-current="page"' : ""}>${label}</a>`;
+          return `<a href="${href}" class="${on ? "active" : ""}" ${on ? 'aria-current="page"' : ""}>
+            <span class="nav-icon" aria-hidden="true">${icon}</span><span class="nav-full">${label}</span><span class="nav-short" aria-hidden="true">${short}</span></a>`;
         })
         .join("")}
     </nav>
@@ -674,6 +691,8 @@ document.addEventListener("click", async (e) => {
   }
 
   if (action === "cancel") return openCancelModal(el.dataset.ref);
+
+  if (action === "simulate") return runSimulation(el);
 });
 
 window.addEventListener("hashchange", render);
@@ -1172,7 +1191,8 @@ function slotsFor(opens, closes) {
   return out;
 }
 
-const tooSoon = (day, time) => new Date(`${day}T${time}:00`).getTime() < Date.now() + LEAD_MINUTES * 60000;
+const tooSoon = (day, time) =>
+  new Date(`${day}T${time}:00`).getTime() < Date.now() + CONFIG.booking.min_lead_minutes * 60000;
 
 async function openBookingModal({ offeringId, price, centre, test }) {
   openModal(`${modalHead("Book your test", "New booking")}<div class="modal-body" style="place-items:center;min-height:200px"><span class="spinner"></span></div>`);
@@ -1331,6 +1351,7 @@ function openPayModal(booking, { onClose } = {}) {
             <label class="choice"><input type="radio" name="outcome" value="success" checked><span>Approve</span></label>
             <label class="choice"><input type="radio" name="outcome" value="failure"><span>Decline</span></label>
             <label class="choice"><input type="radio" name="outcome" value="random"><span>Let the gateway decide</span></label>
+            ${CONFIG.payment_simulator ? `<label class="choice"><input type="radio" name="outcome" value="pending"><span>Approve later, by webhook</span></label>` : ""}
           </fieldset>
 
           <p class="sim-note">${ICON.shield}This is a simulated gateway. No real money moves.</p>
@@ -1371,18 +1392,22 @@ function openPayModal(booking, { onClose } = {}) {
 
   const drawResult = (p) => {
     const ok = p.status === "SUCCESS";
+    const waiting = p.status === "PENDING";
+    const title = ok ? "Payment received" : waiting ? "Waiting for approval" : "Payment declined";
+    const headline = ok ? "You're booked in." : waiting ? "Approve it in your UPI app." : "That didn't go through.";
+    const detail = ok
+      ? `Your appointment on ${esc(fmtDateTime(booking.scheduled_for))} is confirmed.`
+      : waiting
+        ? "The provider accepted the request and will confirm it through our webhook. On the booking page, the simulator plays the provider."
+        : esc(p.failure_reason || "The payment provider declined the charge.");
     openModal(
       `
-      ${modalHead(ok ? "Payment received" : "Payment declined", p.reference)}
+      ${modalHead(title, p.reference)}
       <div class="modal-body">
         <div class="result">
-          <div class="result-art">${art(p.reference, { w: 300, h: 300, tone: ok ? "success" : "failure" })}</div>
-          <h2>${ok ? "You're booked in." : "That didn't go through."}</h2>
-          <p class="muted">${
-            ok
-              ? `Your appointment on ${esc(fmtDateTime(booking.scheduled_for))} is confirmed.`
-              : esc(p.failure_reason || "The payment provider declined the charge.")
-          }</p>
+          <div class="result-art">${art(p.reference, { w: 300, h: 300, tone: ok ? "success" : waiting ? null : "failure" })}</div>
+          <h2>${headline}</h2>
+          <p class="muted">${detail}</p>
           <dl class="kv">
             <div><dt>Amount</dt><dd>${money(p.amount, p.currency)}</dd></div>
             <div><dt>Method</dt><dd>${esc(METHODS.find(([v]) => v === p.method)?.[1] ?? p.method)}</dd></div>
@@ -1395,14 +1420,14 @@ function openPayModal(booking, { onClose } = {}) {
       </div>
       <div class="modal-foot">
         ${
-          ok
+          ok || waiting
             ? `<span></span><button class="btn primary" data-action="close-modal" autofocus>View booking</button>`
             : `<button class="btn ghost" data-action="close-modal">Pay later</button><button class="btn accent" id="retry-pay" autofocus>Try again</button>`
         }
       </div>`,
       { onClose }
     );
-    if (!ok) {
+    if (!ok && !waiting) {
       $("#retry-pay", modal).addEventListener("click", () => {
         key = newKey(); // a genuinely new attempt gets a new key
         booking = { ...booking, status: "FAILED" };
@@ -1419,7 +1444,7 @@ function openCancelModal(reference) {
     ${modalHead("Cancel this booking?", reference)}
     <form id="cancel-form" novalidate style="display:contents">
       <div class="modal-body">
-        <p>You can book the same slot again afterwards. Confirmed bookings can't be cancelled within two hours of the appointment.</p>
+        <p>You can book the same slot again afterwards. Confirmed bookings can't be cancelled within ${CONFIG.booking.cancellation_cutoff_hours} hours of the appointment.</p>
         <div class="field">
           <label for="reason">Reason <span class="muted">(optional)</span></label>
           <textarea class="input" id="reason" name="reason" maxlength="255" placeholder="Helps the centre plan their day" autofocus></textarea>
@@ -1531,6 +1556,231 @@ async function bookingsView({ query, token }) {
       );
 }
 
+/* ─────────────────────────── booking lifecycle ─────────────────────────── */
+
+const LIFECYCLE_NODES = {
+  PENDING: { x: 160, y: 34, fill: "#FFB23F" },
+  CONFIRMED: { x: 70, y: 130, fill: "#1A9E8F" },
+  FAILED: { x: 250, y: 130, fill: "#FF6B57" },
+  CANCELLED: { x: 160, y: 226, fill: "#D9D5E2" },
+};
+
+// Mirrors ALLOWED_TRANSITIONS in apps/bookings/services.py. Laid out
+// vertically so it stays legible in a narrow sidebar column.
+const LIFECYCLE_EDGES = [
+  { from: "PENDING", to: "CONFIRMED", d: "M140 53 L90 110", label: "paid", lx: 96, ly: 76 },
+  { from: "PENDING", to: "FAILED", d: "M180 53 L230 110", label: "declined", lx: 238, ly: 76 },
+  { from: "FAILED", to: "PENDING", d: "M282 111 Q312 40 220 30", label: "retry", lx: 304, ly: 98 },
+  { from: "PENDING", to: "CANCELLED", d: "M160 53 L160 204", label: "cancel", lx: 184, ly: 164 },
+  { from: "CONFIRMED", to: "CANCELLED", d: "M90 149 L138 206", label: "", lx: 0, ly: 0 },
+  { from: "FAILED", to: "CANCELLED", d: "M230 149 L182 206", label: "", lx: 0, ly: 0 },
+];
+
+/** The booking state machine, with the path this booking actually took. */
+function lifecycleDiagram(b) {
+  const taken = new Set(
+    b.status_changes.filter((c) => c.from_status).map((c) => `${c.from_status}>${c.to_status}`)
+  );
+  const visited = new Set(b.status_changes.map((c) => c.to_status));
+  const path = [...b.status_changes].reverse().map((c) => c.to_status).join(" then ");
+
+  const edges = LIFECYCLE_EDGES.map((e) => {
+    const on = taken.has(`${e.from}>${e.to}`);
+    return `
+      <path d="${e.d}" fill="none" stroke="${on ? INK : "#D6CEC0"}" stroke-width="${on ? 2.5 : 1.5}"
+        ${on ? "" : 'stroke-dasharray="5 5"'} marker-end="url(#arrow-${on ? "on" : "off"})"/>
+      ${e.label ? `<text x="${e.lx}" y="${e.ly}" class="lc-edge ${on ? "on" : ""}">${e.label}</text>` : ""}`;
+  }).join("");
+
+  const nodes = Object.entries(LIFECYCLE_NODES).map(([name, n]) => {
+    const current = name === b.status;
+    const seen = visited.has(name);
+    const fill = current ? n.fill : seen ? "#FFFFFF" : "#F4EEE4";
+    const stroke = current || seen ? INK : "#DCD3C5";
+    return `
+      <g class="lc-node ${current ? "current" : ""}">
+        <rect x="${n.x - 58}" y="${n.y - 18}" width="116" height="36" rx="18"
+          fill="${fill}" stroke="${stroke}" stroke-width="${current ? 2.5 : seen ? 2 : 1.5}"/>
+        <text x="${n.x}" y="${n.y + 5}" class="lc-label ${current || seen ? "" : "dim"}">${name}</text>
+      </g>`;
+  }).join("");
+
+  return `
+    <svg class="lifecycle" viewBox="0 0 320 250" role="img" aria-labelledby="lc-title">
+      <title id="lc-title">Booking lifecycle. Current state ${esc(b.status)}. Path taken: ${esc(path)}.</title>
+      <defs>
+        <marker id="arrow-on" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="${INK}"/></marker>
+        <marker id="arrow-off" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="#D6CEC0"/></marker>
+      </defs>
+      ${edges}
+      ${nodes}
+    </svg>`;
+}
+
+/* ─────────────────────────── provider simulator ────────────────────────── */
+
+/** Simulation runs per booking, newest first. Survives re-renders. */
+const simLog = new Map();
+/** The chosen deliveries-per-event, kept across re-renders. */
+let simDeliveries = 3;
+
+const DELIVERY_OUTCOMES = {
+  booking_confirmed: ["ok", "Processed: booking confirmed"],
+  booking_failed: ["ok", "Processed: booking marked as payment failed"],
+  already_success: ["ok", "Processed: already paid, nothing to change"],
+  already_failed: ["ok", "Processed: already declined, nothing to change"],
+  conflicting_outcome_ignored: ["refused", "Refused: payment already settled, the first outcome wins"],
+  refund_required: ["refused", "Recorded: booking was cancelled, refund flagged"],
+  booking_already_terminal: ["refused", "Recorded: booking already closed"],
+  queued: ["queued", "Accepted: queued for the background worker"],
+  processing_failed: ["error", "Processing failed: stored and scheduled for retry"],
+};
+
+function describeDelivery(d) {
+  if (d.http_status >= 400) return ["error", `Rejected (HTTP ${d.http_status})`];
+  if (d.duplicate) return ["dup", "Duplicate: already received, not processed again"];
+  return DELIVERY_OUTCOMES[d.result] ?? ["ok", d.result || "Processed"];
+}
+
+function simRun(run) {
+  const processed = run.deliveries.filter((d) => !d.duplicate && d.http_status < 400).length;
+  const after = run.final?.booking_status ?? run.booking_status_after;
+  const changed = run.booking_status_before !== after;
+  const final = run.final ? DELIVERY_OUTCOMES[run.final.result] : null;
+  return `
+    <div class="sim-run">
+      <div class="sim-run-head">
+        <span class="sim-type ${run.event_type === "payment.succeeded" ? "ok" : "refused"}">${esc(run.event_type)}</span>
+        <span class="code" title="${esc(run.event_id)}">${esc(run.event_id.slice(0, 16))}…</span>
+        <span class="muted">× ${run.deliveries.length} · handled ${processed === 1 ? "once" : `${processed}×`}</span>
+      </div>
+      <ol class="sim-deliveries">
+        ${run.deliveries
+          .map((d) => {
+            const [kind, text] = describeDelivery(d);
+            return `<li class="${kind}"><span class="n">#${d.attempt}</span><span class="http">${d.http_status}</span><span>${esc(text)}</span></li>`;
+          })
+          .join("")}
+        ${final ? `<li class="${final[0]}"><span class="n">↳</span><span class="http">worker</span><span>${esc(final[1])}</span></li>` : ""}
+      </ol>
+      <div class="sim-outcome">
+        Booking ${changed ? `${chip(run.booking_status_before)} → ${chip(after)}` : `unchanged ${chip(after)}`}
+      </div>
+    </div>`;
+}
+
+function simulatorCard(b, target) {
+  if (!CONFIG.payment_simulator || !target) return "";
+  const runs = simLog.get(b.reference) ?? [];
+  return `
+    <section class="card pad sim" aria-labelledby="sim-title">
+      <div class="sim-head">
+        <div>
+          <p class="eyebrow">Demo mode</p>
+          <h3 id="sim-title">Payment provider simulator</h3>
+        </div>
+        <span class="chip lilac plain">Signed · real webhook endpoint</span>
+      </div>
+      <p class="sim-lede">
+        Plays the payment provider calling <span class="code">POST /payments/webhook/</span> about
+        <span class="code">${esc(target.reference)}</span> ${chip(target.status, PAYMENT_STATUS)}.
+        Each event is signed on the server with the real secret and goes through the real endpoint.
+        Send one several times and watch it apply exactly once.
+      </p>
+      <div class="sim-controls">
+        <fieldset class="choices">
+          <legend>Deliver each event</legend>
+          ${[1, 2, 3, 5].map((n) => `<label class="choice"><input type="radio" name="sim-deliveries" value="${n}" ${n === simDeliveries ? "checked" : ""}><span>${n}×</span></label>`).join("")}
+        </fieldset>
+        <div class="actions">
+          <button class="btn primary" data-action="simulate" data-outcome="success"
+            data-payment="${esc(target.reference)}" data-booking="${esc(b.reference)}">Send “payment succeeded”</button>
+          <button class="btn danger" data-action="simulate" data-outcome="failure"
+            data-payment="${esc(target.reference)}" data-booking="${esc(b.reference)}">Send “payment failed”</button>
+        </div>
+      </div>
+      <div class="sim-log" aria-live="polite">
+        ${runs.length ? runs.map(simRun).join("") : `<p class="muted sim-empty">${
+          target.status === "PENDING"
+            ? "No simulated deliveries yet. Try sending “payment succeeded” 3× and watch it confirm the booking once."
+            : "This payment is already settled. Send either event to see duplicates recorded and a contradicting outcome refused."
+        }</p>`}
+      </div>
+      <div class="sim-events">
+        <p class="label">Webhook deliveries received for this payment</p>
+        <div id="sim-events" data-payment="${esc(target.reference)}"><p class="muted">Loading…</p></div>
+      </div>
+    </section>`;
+}
+
+function webhookEventsTable(events) {
+  if (!events.length) return `<p class="muted">None yet.</p>`;
+  return `
+    <div class="table-wrap">
+      <table class="list compact">
+        <thead><tr><th>Event</th><th>Type</th><th class="num">Delivered</th><th>Status</th><th>What it did</th></tr></thead>
+        <tbody>
+          ${events
+            .map(
+              (e) => `
+            <tr>
+              <td><span class="code" title="${esc(e.event_id)}">${esc(e.event_id.slice(0, 12))}…</span></td>
+              <td>${esc(e.event_type.replace("payment.", ""))}</td>
+              <td class="num"><b>${e.delivery_count}×</b></td>
+              <td>${esc(e.status.toLowerCase())}</td>
+              <td class="muted">${esc((DELIVERY_OUTCOMES[e.result]?.[1] ?? e.result) || "Waiting for the worker")}</td>
+            </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+async function runSimulation(button) {
+  const { payment, outcome, booking } = button.dataset;
+  const deliveries = Number($("input[name=sim-deliveries]:checked")?.value || 3);
+  simDeliveries = deliveries;
+  $$("[data-action=simulate]").forEach((b) => (b.disabled = true));
+  busy(button, true, `Delivering ${deliveries}×…`);
+  try {
+    const run = await api(`/payments/${encodeURIComponent(payment)}/simulate-webhook/`, {
+      method: "POST",
+      body: { outcome, deliveries },
+    });
+    const runs = simLog.get(booking) ?? [];
+    runs.unshift(run);
+    simLog.set(booking, runs.slice(0, 5));
+
+    // With a Celery worker the first delivery is only queued: give the
+    // worker a moment and record what it actually did.
+    if (run.deliveries.some((d) => d.result === "queued")) {
+      for (let i = 0; i < 16; i++) {
+        await new Promise((r) => setTimeout(r, 600));
+        const events = await api(`/payments/${encodeURIComponent(payment)}/webhook-events/`);
+        const ev = events.find((e) => e.event_id === run.event_id);
+        if (ev && ev.status !== "RECEIVED") {
+          const fresh = await api(`/bookings/${encodeURIComponent(booking)}/`);
+          run.final = { result: ev.result, booking_status: fresh.status };
+          break;
+        }
+      }
+    }
+    const processed = run.deliveries.filter((d) => !d.duplicate).length;
+    const n = run.deliveries.length;
+    toast(`${n} ${n === 1 ? "delivery" : "deliveries"}, handled ${processed === 1 ? "once" : `${processed}×`}`, "success");
+    await render();
+  } catch (err) {
+    toast(err.message, "error");
+    busy(button, false);
+    $$("[data-action=simulate]").forEach((b) => (b.disabled = false));
+  }
+}
+
+/* ───────────────────────────── booking detail ─────────────────────────── */
+
 async function bookingDetailView({ params: [reference], token }) {
   paint(token, `<a class="back" href="#/bookings">${ICON.back} My bookings</a>${skeletons(1, "card-sk")}`);
 
@@ -1540,52 +1790,66 @@ async function bookingDetailView({ params: [reference], token }) {
   ]);
 
   const history = [...b.status_changes].reverse(); // oldest first
+  const latest = payments.results[0] ?? null;
+  const awaitingProvider = latest?.status === "PENDING";
   const canCancel = b.status !== "CANCELLED";
-  const statusCallout = {
-    PENDING: `<div class="callout">${ICON.info}<span>Your slot is held but not confirmed until you pay.</span></div>`,
-    FAILED: `<div class="callout coral">${ICON.info}<span>The last payment was declined. Your slot is still held — try again.</span></div>`,
-    CONFIRMED: `<div class="callout teal">${ICON.shield}<span>You're all set. Bring a photo ID and arrive ten minutes early.</span></div>`,
-    CANCELLED: "",
-  }[b.status];
+  const statusCallout = awaitingProvider
+    ? `<div class="callout sky">${ICON.clock}<span><b>Waiting for the payment provider</b> to confirm ${esc(latest.reference)}.
+        ${CONFIG.payment_simulator ? "Play the provider with the simulator below." : "This usually takes a few seconds."}</span></div>`
+    : {
+        PENDING: `<div class="callout">${ICON.info}<span>Your slot is held but not confirmed until you pay.</span></div>`,
+        FAILED: `<div class="callout coral">${ICON.info}<span>The last payment was declined. Your slot is still held, so try again.</span></div>`,
+        CONFIRMED: `<div class="callout teal">${ICON.shield}<span>You're all set. Bring a photo ID and arrive ten minutes early.</span></div>`,
+        CANCELLED: "",
+      }[b.status];
 
   paint(
     token,
     `
     <a class="back" href="#/bookings">${ICON.back} My bookings</a>
     <div class="detail-grid">
-      <article class="banner">
-        <div class="banner-art" style="height:150px">${art(`test-${b.test.code}`, { w: 1000, h: 200 })}</div>
-        <div class="banner-body">
-          <div class="banner-top">
-            <div class="stack" style="--gap:8px">
-              ${chip(b.status, BOOKING_STATUS, "big")}
-              <h1 style="font-size:clamp(1.6rem,3.5vw,2.3rem)">${esc(b.test.name)}</h1>
-              <p class="muted"><a href="#/centres/${b.centre.id}">${esc(b.centre.name)}</a>, ${esc(b.centre.city)}</p>
+      <div class="stack" style="--gap:24px">
+        <article class="banner">
+          <div class="banner-art" style="height:150px">${art(`test-${b.test.code}`, { w: 1000, h: 200 })}</div>
+          <div class="banner-body">
+            <div class="banner-top">
+              <div class="stack" style="--gap:8px">
+                ${chip(b.status, BOOKING_STATUS, "big")}
+                <h1 style="font-size:clamp(1.6rem,3.5vw,2.3rem)">${esc(b.test.name)}</h1>
+                <p class="muted"><a href="#/centres/${b.centre.id}">${esc(b.centre.name)}</a>, ${esc(b.centre.city)}</p>
+              </div>
+              <div class="price-block">
+                <p class="price xl">${money(b.amount, b.currency)}</p>
+                <span class="code">${esc(b.reference)}</span>
+              </div>
             </div>
-            <div class="price-block">
-              <p class="price xl">${money(b.amount, b.currency)}</p>
-              <span class="code">${esc(b.reference)}</span>
+
+            <div class="facts">
+              <div class="fact"><div class="label">Date</div><div class="value">${esc(fmtDate(b.scheduled_for))}</div></div>
+              <div class="fact"><div class="label">Time</div><div class="value">${esc(fmtTime(b.scheduled_for))}</div></div>
+              <div class="fact"><div class="label">Report</div><div class="value">~${b.test.report_eta_hours}h after</div></div>
+            </div>
+
+            ${statusCallout}
+            ${b.patient_notes ? `<div><p class="label">Your notes</p><p>${esc(b.patient_notes)}</p></div>` : ""}
+
+            <div class="actions">
+              ${b.can_be_paid && !awaitingProvider ? `<button class="btn accent" data-action="pay" data-ref="${esc(b.reference)}">Pay ${money(b.amount, b.currency)}</button>` : ""}
+              ${canCancel ? `<button class="btn danger" data-action="cancel" data-ref="${esc(b.reference)}">Cancel booking</button>` : ""}
+              <a class="btn ghost" href="#/tests/${encodeURIComponent(b.test.code)}">About this test</a>
             </div>
           </div>
-
-          <div class="facts">
-            <div class="fact"><div class="label">Date</div><div class="value">${esc(fmtDate(b.scheduled_for))}</div></div>
-            <div class="fact"><div class="label">Time</div><div class="value">${esc(fmtTime(b.scheduled_for))}</div></div>
-            <div class="fact"><div class="label">Report</div><div class="value">~${b.test.report_eta_hours}h after</div></div>
-          </div>
-
-          ${statusCallout}
-          ${b.patient_notes ? `<div><p class="label">Your notes</p><p>${esc(b.patient_notes)}</p></div>` : ""}
-
-          <div class="actions">
-            ${b.can_be_paid ? `<button class="btn accent" data-action="pay" data-ref="${esc(b.reference)}">Pay ${money(b.amount, b.currency)}</button>` : ""}
-            ${canCancel ? `<button class="btn danger" data-action="cancel" data-ref="${esc(b.reference)}">Cancel booking</button>` : ""}
-            <a class="btn ghost" href="#/tests/${encodeURIComponent(b.test.code)}">About this test</a>
-          </div>
-        </div>
-      </article>
+        </article>
+        ${simulatorCard(b, latest)}
+      </div>
 
       <div class="stack" style="--gap:24px">
+        <section class="card pad">
+          <h3>Lifecycle</h3>
+          <p class="muted" style="font-size:.88rem;margin:2px 0 8px">The booking state machine. Bold arrows are the path this booking took.</p>
+          ${lifecycleDiagram(b)}
+        </section>
+
         <section class="card pad">
           <h3 style="margin-bottom:18px">History</h3>
           <ol class="timeline">
@@ -1615,7 +1879,10 @@ async function bookingDetailView({ params: [reference], token }) {
               <div>
                 <div style="font-weight:700">${money(p.amount, p.currency)} <span class="muted" style="font-weight:500">· ${esc(METHODS.find(([v]) => v === p.method)?.[1] ?? p.method)}</span></div>
                 <div class="muted" style="font-size:.85rem">${esc(fmtDateTime(p.created_at))}${p.failure_reason ? ` · ${esc(p.failure_reason)}` : ""}</div>
-                <span class="code">${esc(p.reference)}</span>
+                <div class="pay-ids">
+                  <span class="code">${esc(p.reference)}</span>
+                  ${p.idempotency_key ? `<span class="code" title="Idempotency-Key: ${esc(p.idempotency_key)}">key ${esc(p.idempotency_key.slice(0, 8))}…</span>` : ""}
+                </div>
               </div>
               ${chip(p.status, PAYMENT_STATUS)}
             </div>`
@@ -1627,6 +1894,12 @@ async function bookingDetailView({ params: [reference], token }) {
       </div>
     </div>`
   );
+
+  const eventsBox = $("#sim-events");
+  if (eventsBox) {
+    const events = await api(`/payments/${encodeURIComponent(eventsBox.dataset.payment)}/webhook-events/`);
+    if (token === renderToken) eventsBox.innerHTML = webhookEventsTable(events);
+  }
 }
 
 /* ═══════════════════════════════ payments ════════════════════════════════ */
@@ -1682,4 +1955,11 @@ async function paymentsView({ token }) {
 
 /* ═════════════════════════════════ boot ══════════════════════════════════ */
 
-render();
+api("/config/", { authed: false })
+  .then((config) => {
+    CONFIG = config;
+  })
+  .catch(() => {
+    /* keep the defaults; the server enforces the real rules either way */
+  })
+  .finally(render);
