@@ -36,6 +36,12 @@ docker compose up --build
 That starts Postgres, Redis, the API and a Celery worker; migrations run and
 the catalogue is seeded automatically on boot.
 
+Port 8000, 5432 or 6379 already taken on your machine? Override any of them:
+
+```bash
+WEB_PORT=8001 DB_PORT=5433 REDIS_PORT=6380 docker compose up --build
+```
+
 - **App (frontend): <http://localhost:8000/>**
 - API: <http://localhost:8000/api/v1/>
 - Swagger UI: <http://localhost:8000/api/docs/>
@@ -271,14 +277,24 @@ curl -s -X POST $BASE/payments/ \
 docker compose exec web python manage.py send_test_webhook --payment PAY-XXXXXXXX --times 3
 ```
 
+Real output from the docker-compose stack:
+
 ```
-delivery 1/3: HTTP 200 {'received': True, 'duplicate': False, 'result': 'already_success'}
-delivery 2/3: HTTP 200 {'received': True, 'duplicate': True,  'result': 'already_success'}
-delivery 3/3: HTTP 200 {'received': True, 'duplicate': True,  'result': 'already_success'}
+delivery 1/3: HTTP 200 {'received': True, 'duplicate': False, 'status': 'RECEIVED', 'result': 'queued'}
+delivery 2/3: HTTP 200 {'received': True, 'duplicate': True,  'status': 'RECEIVED', 'result': 'already_recorded'}
+delivery 3/3: HTTP 200 {'received': True, 'duplicate': True,  'status': 'RECEIVED', 'result': 'already_recorded'}
 ```
 
-One `WebhookEvent` row, one `Payment` row, one booking transition. Add
-`--print-only` to get a signed `curl` command instead of sending.
+The first delivery is stored and queued for the Celery worker. The next two
+are recognised as duplicates on arrival, before the worker has even run. A
+moment later the one stored event is `PROCESSED` with result
+`already_success`: the charge had already settled synchronously, so the
+webhook confirmed it without a second transition. That makes one
+`WebhookEvent` row, one `Payment` row and one booking transition. Without a
+broker (plain `runserver`) the event is processed inline, so delivery 1
+reports `already_success` directly.
+
+Add `--print-only` to get a signed `curl` command instead of sending.
 
 ---
 
