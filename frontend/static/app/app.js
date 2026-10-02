@@ -1343,11 +1343,10 @@ function openPayModal(booking, { onClose } = {}) {
             ${METHODS.map(([v, l], i) => `<label class="choice"><input type="radio" name="method" value="${v}" ${i === 0 ? "checked" : ""}><span>${l}</span></label>`).join("")}
           </fieldset>
 
-          <p class="sim-note">${ICON.shield}Simulated gateway: like a real one, it approves most payments and declines some. No real money moves.</p>
           ${error ? `<p class="form-error" role="alert">${esc(error)}</p>` : ""}
         </div>
         <div class="modal-foot">
-          <span class="muted" style="font-size:.8rem">Idempotency key <span class="code">${esc(key.slice(0, 8))}…</span></span>
+          <span></span>
           <button class="btn accent" type="submit" autofocus>Pay ${money(booking.amount, booking.currency)}</button>
         </div>
       </form>`,
@@ -1711,7 +1710,6 @@ async function bookingDetailView({ params: [reference], token }) {
                 <div class="muted" style="font-size:.85rem">${esc(fmtDateTime(p.created_at))}${p.failure_reason ? ` · ${esc(p.failure_reason)}` : ""}</div>
                 <div class="pay-ids">
                   <span class="code">${esc(p.reference)}</span>
-                  ${p.idempotency_key ? `<span class="code" title="Idempotency-Key: ${esc(p.idempotency_key)}">key ${esc(p.idempotency_key.slice(0, 8))}…</span>` : ""}
                 </div>
               </div>
               ${chip(p.status, PAYMENT_STATUS)}

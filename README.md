@@ -131,7 +131,7 @@ the whole product at <http://localhost:8000/>. Log in with the demo patient
 5. **Track:** each booking shows its status, a **lifecycle diagram** of the
    state machine with the path this booking took drawn in bold, its full
    transition history (who changed it: you, the payment, or the provider
-   webhook) and every payment attempt with its idempotency key. You can
+   webhook) and every payment attempt. You can
    cancel from there.
 
 **Design.** A warm paper background, ink for anything you read, and a palette

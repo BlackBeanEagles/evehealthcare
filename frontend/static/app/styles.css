@@ -896,14 +896,6 @@ table.list .t-name { font-weight: 700; }
 .slot-group + .slot-group { margin-top: 14px; }
 .slot-group .label { display: block; margin-bottom: 8px; font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); }
 
-.sim-note {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: .85rem;
-  color: var(--ink-3);
-}
-.sim-note svg { width: 16px; height: 16px; }
 
 .result { text-align: center; display: grid; justify-items: center; gap: 12px; padding: 12px 0 4px; }
 .result-art { width: 150px; height: 150px; border-radius: 50%; overflow: hidden; border: 2px solid var(--ink); }
