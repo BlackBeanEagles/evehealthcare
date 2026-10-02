@@ -213,9 +213,13 @@ p { margin: 0; }
 
 .nav-icon, .nav-short { display: none; }
 
-/* Phones: the main nav becomes a bottom tab bar, so all four destinations
-   are always visible and within thumb reach (it used to scroll off-screen). */
-@media (max-width: 720px) {
+/* The full top bar (brand + four links + avatar, name, log out) needs about
+   900px; between 720px and that, the avatar overlapped the last link. */
+@media (max-width: 1040px) { .me-name { display: none; } }
+
+/* Phones and narrow windows: the main nav becomes a bottom tab bar, so all
+   four destinations are always visible (it used to scroll off-screen). */
+@media (max-width: 900px) {
   .me-name { display: none; }
   .me { margin-left: auto; }
   .nav {

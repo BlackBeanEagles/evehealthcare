@@ -1,6 +1,8 @@
 """The single-page frontend served at /."""
 from __future__ import annotations
 
+import re
+
 import pytest
 from django.contrib.staticfiles import finders
 from django.urls import reverse
@@ -16,6 +18,28 @@ def test_the_app_shell_is_served_at_the_root(api_client):
     assert 'id="view"' in html
     assert "app/app.js" in html
     assert "app/styles.css" in html
+
+
+def test_in_debug_asset_urls_carry_a_version_so_edits_are_never_served_stale(
+    api_client, settings
+):
+    """Found while testing: after an edit, browsers kept running the old
+    app.js because the dev URL never changed. Each URL now carries the file's
+    modification time."""
+    settings.DEBUG = True
+
+    html = api_client.get(reverse("app")).content.decode()
+
+    assert re.search(r'app/app\.js\?v=\d+"', html)
+    assert re.search(r'app/styles\.css\?v=\d+"', html)
+
+
+def test_without_debug_the_storage_provides_the_versioning(api_client, settings):
+    settings.DEBUG = False
+
+    html = api_client.get(reverse("app")).content.decode()
+
+    assert "?v=" not in html  # production uses content-hashed filenames instead
 
 
 def test_the_app_shell_needs_no_authentication(api_client):
