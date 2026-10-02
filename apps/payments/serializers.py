@@ -4,7 +4,7 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from apps.payments.gateway import VALID_OUTCOMES
-from apps.payments.models import Payment, PaymentMethod, WebhookEvent
+from apps.payments.models import Payment, PaymentMethod
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -50,46 +50,3 @@ class WebhookAcknowledgementSerializer(serializers.Serializer):
     event_id = serializers.CharField()
     status = serializers.CharField()
     result = serializers.CharField()
-
-
-class WebhookEventSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = WebhookEvent
-        fields = [
-            "event_id", "event_type", "status", "result",
-            "delivery_count", "attempts", "received_at", "processed_at",
-        ]
-        read_only_fields = fields
-
-
-class SimulateWebhookSerializer(serializers.Serializer):
-    EVENT_TYPES = {"success": "payment.succeeded", "failure": "payment.failed"}
-
-    outcome = serializers.ChoiceField(
-        choices=[("success", "success"), ("failure", "failure")],
-        help_text="Which outcome the simulated provider reports.",
-    )
-    deliveries = serializers.IntegerField(
-        min_value=1, max_value=5, default=3,
-        help_text="Deliver the same event this many times, as a provider "
-        "retrying on a timeout would.",
-    )
-
-
-class SimulatedDeliverySerializer(serializers.Serializer):
-    attempt = serializers.IntegerField()
-    http_status = serializers.IntegerField()
-    duplicate = serializers.BooleanField()
-    status = serializers.CharField()
-    result = serializers.CharField()
-
-
-class SimulationResultSerializer(serializers.Serializer):
-    """Documents the simulator response for the OpenAPI schema."""
-
-    event_id = serializers.CharField()
-    event_type = serializers.CharField()
-    deliveries = SimulatedDeliverySerializer(many=True)
-    booking_status_before = serializers.CharField()
-    booking_status_after = serializers.CharField()
-    payment = PaymentSerializer()

@@ -5,11 +5,9 @@ import json
 import logging
 
 from django.conf import settings
-from django.db.models import Q, QuerySet
-from django.test import RequestFactory
+from django.db.models import QuerySet
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import mixins, status, viewsets
-from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -18,18 +16,14 @@ from rest_framework.views import APIView
 
 from apps.bookings.models import Booking
 from apps.common.exceptions import ResourceNotFound, ValidationFailed
-from apps.payments.gateway import SimulatedPaymentGateway
-from apps.payments.models import Payment, PaymentStatus, WebhookEvent, WebhookEventStatus
+from apps.payments.models import Payment, PaymentStatus, WebhookEventStatus
 from apps.payments.serializers import (
     PaymentCreateSerializer,
     PaymentSerializer,
-    SimulateWebhookSerializer,
-    SimulationResultSerializer,
     WebhookAcknowledgementSerializer,
-    WebhookEventSerializer,
 )
 from apps.payments.services import ingest_webhook_event, initiate_payment
-from apps.payments.signature import META_KEY, SIGNATURE_HEADER, build_header, verify_signature
+from apps.payments.signature import META_KEY, SIGNATURE_HEADER, verify_signature
 from apps.payments.tasks import dispatch_webhook_event
 
 logger = logging.getLogger(__name__)
@@ -59,24 +53,16 @@ class PaymentViewSet(
     lookup_field = "reference"
     lookup_value_regex = "[A-Za-z0-9-]+"
 
-    #: Only actions that move money (or simulate the provider) get the tight
-    #: "payments" rate; reads use the normal per-user rate, so a page polling
-    #: its payment status can't lock the patient out of paying.
-    WRITE_ACTIONS = frozenset({"create", "simulate_webhook"})
-
     def get_throttles(self):
-        if self.action in self.WRITE_ACTIONS:
+        # Only charging gets the tight "payments" rate; reads use the normal
+        # per-user rate, so a page re-checking payment status can't lock the
+        # patient out of paying.
+        if self.action == "create":
             return [ScopedRateThrottle()]
         return super().get_throttles()
 
     def get_serializer_class(self):
-        if self.action == "create":
-            return PaymentCreateSerializer
-        if self.action == "simulate_webhook":
-            return SimulateWebhookSerializer
-        if self.action == "webhook_events":
-            return WebhookEventSerializer
-        return PaymentSerializer
+        return PaymentCreateSerializer if self.action == "create" else PaymentSerializer
 
     def get_queryset(self) -> QuerySet[Payment]:
         queryset = Payment.objects.filter(booking__user=self.request.user).select_related(
@@ -157,94 +143,6 @@ class PaymentViewSet(
             PaymentSerializer(payment).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
-
-
-    @extend_schema(
-        tags=["payments"],
-        summary="Webhook deliveries received for this payment",
-        description=(
-            "Every event the provider sent about this payment, with how many "
-            "times it was delivered and what processing it did. Redeliveries "
-            "increment `delivery_count` and are never processed again."
-        ),
-        responses={200: WebhookEventSerializer(many=True)},
-    )
-    @action(detail=True, methods=["get"], url_path="webhook-events")
-    def webhook_events(self, request: Request, reference: str | None = None) -> Response:
-        payment = self.get_object()
-        match = Q(payload__data__payment_reference=payment.reference)
-        if payment.provider_reference:
-            match |= Q(provider_reference=payment.provider_reference)
-        events = WebhookEvent.objects.filter(match).order_by("received_at")
-        return Response(WebhookEventSerializer(events, many=True).data)
-
-    @extend_schema(
-        tags=["payments"],
-        summary="Simulate the payment provider (demo mode only)",
-        description=(
-            "Plays the payment provider for one of *your* payments: builds a "
-            "`payment.succeeded` / `payment.failed` event, signs it with the "
-            "real webhook secret and delivers it `deliveries` times through the "
-            "real `POST /payments/webhook/` view (signature check, "
-            "deduplication and processing are exactly what a provider's "
-            "request gets). The same event id is reused on every delivery, as a "
-            "provider retrying on a timeout would.\n\n"
-            "Available only when `PAYMENT_SIMULATOR_ENABLED` is on (it defaults "
-            "to `DEBUG`); otherwise this route is a 404."
-        ),
-        request=SimulateWebhookSerializer,
-        responses={200: SimulationResultSerializer},
-    )
-    @action(detail=True, methods=["post"], url_path="simulate-webhook")
-    def simulate_webhook(self, request: Request, reference: str | None = None) -> Response:
-        if not settings.PAYMENT_SIMULATOR_ENABLED:
-            # 404, not 403: in production the route should not appear to exist.
-            raise ResourceNotFound("Not found.")
-        payment = self.get_object()  # scoped to the caller's own payments
-        serializer = SimulateWebhookSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        event_type = SimulateWebhookSerializer.EVENT_TYPES[serializer.validated_data["outcome"]]
-        before = payment.booking.status
-        event = SimulatedPaymentGateway.build_event(payment, event_type=event_type)
-        body = json.dumps(event).encode()
-        signature = build_header(settings.PAYMENT_WEBHOOK_SECRET, body)
-        webhook = PaymentWebhookView.as_view()
-
-        deliveries = []
-        for attempt in range(1, serializer.validated_data["deliveries"] + 1):
-            delivery = RequestFactory().post(
-                "/api/v1/payments/webhook/",
-                data=body,
-                content_type="application/json",
-                HTTP_X_WEBHOOK_SIGNATURE=signature,
-            )
-            response = webhook(delivery)
-            deliveries.append({
-                "attempt": attempt,
-                "http_status": response.status_code,
-                "duplicate": bool(response.data.get("duplicate")),
-                "status": response.data.get("status", ""),
-                "result": response.data.get("result", ""),
-            })
-
-        payment.refresh_from_db()
-        # refresh_from_db() keeps the cached related booking; reload it too, or
-        # "status after" would silently report the "before" value.
-        payment.booking.refresh_from_db()
-        logger.info(
-            "provider_simulated",
-            extra={"payment_reference": payment.reference, "event_id": event["id"],
-                   "event_type": event_type, "deliveries": len(deliveries)},
-        )
-        return Response({
-            "event_id": event["id"],
-            "event_type": event_type,
-            "deliveries": deliveries,
-            "booking_status_before": before,
-            "booking_status_after": payment.booking.status,
-            "payment": PaymentSerializer(payment).data,
-        })
 
 
 class PaymentWebhookView(APIView):

@@ -3,7 +3,7 @@
 A backend for booking diagnostic tests at partner centres and paying for them
 through a **simulated** payment provider with an **idempotent webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 236 tests
+Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 226 tests
 
 ---
 
@@ -128,20 +128,7 @@ the whole product at <http://localhost:8000/>. Log in with the demo patient
    too. Each attempt carries its own `Idempotency-Key`, so a double-click or a
    flaky retry can never charge twice. After a decline, "Try again" starts a
    fresh attempt.
-5. **Play the payment provider** (the part worth trying). Each booking page
-   has a **Payment provider simulator** that sends signed webhooks for that
-   booking's payment, as many times as you like. After paying, send
-   "payment succeeded" 3×. The log shows one delivery handled (the payment had
-   already settled, so it changes nothing) and two recognised as duplicates,
-   and the webhook table records the event as delivered 3×. Then send
-   "payment failed": it is refused because the first outcome wins, and the
-   booking stays confirmed. The panel signs events on the server and pushes
-   them through the real `POST /payments/webhook/` view, so what you see is
-   the production code path, not a mock of it. To watch a webhook *confirm* a
-   waiting booking, create the payment through the API with
-   `"outcome": "pending"` (a UPI-collect-style charge). The booking then waits,
-   and the simulator confirms it exactly once.
-6. **Track:** each booking shows its status, a **lifecycle diagram** of the
+5. **Track:** each booking shows its status, a **lifecycle diagram** of the
    state machine with the path this booking took drawn in bold, its full
    transition history (who changed it: you, the payment, or the provider
    webhook) and every payment attempt with its idempotency key. You can
@@ -173,14 +160,6 @@ three files under `frontend/`. It is a thin client over the documented API:
   respected. On phones the menu becomes a bottom tab bar.
 - Booking rules (lead time, cancellation cutoff) come from `GET /config/`,
   so the UI can't drift from what the API enforces.
-
-**The simulator is demo-only by design.** It signs with the real webhook
-secret, so the secret never reaches the browser; the server signs on the
-user's behalf. That is exactly why it must never run in production. It is
-controlled by `PAYMENT_SIMULATOR_ENABLED`, which defaults to `DEBUG`: on
-under docker-compose and `runserver`, off in any `DEBUG=false` deployment,
-where the route answers 404 as if it didn't exist. It only ever targets the
-signed-in user's own payments.
 
 Tokens live in `localStorage`, which is fine for a demo; production would use
 httpOnly cookies. See the improvements list.
@@ -232,13 +211,12 @@ as aliases onto the same views.
 | GET | `/api/v1/payments/` | JWT | Your payments — `?status=&booking=` |
 | GET | `/api/v1/payments/{reference}/` | JWT | One payment |
 | POST | `/api/v1/payments/webhook/` | HMAC signature | Provider callback — **idempotent** |
-| GET | `/api/v1/payments/{reference}/webhook-events/` | JWT | Webhooks received for this payment, with `delivery_count` |
-| POST | `/api/v1/payments/{reference}/simulate-webhook/` | JWT | **Demo mode only.** Play the provider: sign an event and deliver it N× through the real webhook view |
 
 `POST /payments/` also accepts `"outcome": "pending"`: the provider accepts the
 charge and settles it later by webhook (the asynchronous flow real UPI and
-3-D Secure payments use). The tight `payments` rate limit applies to writes
-only, so a page polling payment status can't lock a patient out of paying.
+3-D Secure payments use). Try it with the webhook demo below. The tight
+`payments` rate limit applies only to creating payments, so a page re-checking
+payment status can't lock a patient out of paying.
 
 ### Ops
 
@@ -580,7 +558,7 @@ apps/
   payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
                    idempotent settlement, Celery tasks, ops commands
 frontend/          single-page web app (index.html + static/app/{app.js,styles.css})
-tests/             236 tests
+tests/             226 tests
 docker/            entrypoint (wait for db → migrate → seed → run)
 ```
 
@@ -602,7 +580,7 @@ HTTP request, a Celery task or a management command without duplication.
 Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
 header) · Celery worker with retry + backoff for webhook processing · Docker and
 docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-236 tests at 94% coverage · structured JSON logging with request-id correlation ·
+226 tests at 94% coverage · structured JSON logging with request-id correlation ·
 pagination on every list · scoped rate limiting (login, payments, webhook) ·
 webhook retry handling and a reconciliation sweeper · a health endpoint · Django
 admin for back-office · GitHub Actions CI running the suite against Postgres.
@@ -612,9 +590,9 @@ admin for back-office · GitHub Actions CI running the suite against Postgres.
 ## Tests
 
 ```bash
-pytest                                  # in-memory SQLite: 230 run, 6 concurrency tests skip
+pytest                                  # in-memory SQLite: 220 run, 6 concurrency tests skip
 pytest --cov --cov-report=term-missing  # 94% coverage
-DATABASE_URL=postgresql://… pytest      # all 236, including the parallel-request tests
+DATABASE_URL=postgresql://… pytest      # all 226, including the parallel-request tests
 ```
 
 | File | Covers |
@@ -629,7 +607,6 @@ DATABASE_URL=postgresql://… pytest      # all 236, including the parallel-requ
 | `test_ops.py` | Health, schema, request-id tracing, throttling, JSON logs |
 | `test_frontend.py` | The app shell at `/`, its static assets, and that it doesn't shadow the API |
 | `test_concurrency.py` | 8 parallel requests per scenario on Postgres: duplicate webhooks, racing outcomes, double charges, same-key retries, same-slot bookings |
-| `test_simulator.py` | The provider simulator (real signature path, owner-only, 404 when disabled), pending payments, the webhook log, throttle scopes |
 | `test_config.py` | `DATABASE_URL` parsing (incl. the absolute-path regression) and env helpers |
 
 Tests use real JWTs rather than `force_authenticate`, so the token path is

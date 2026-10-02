@@ -68,7 +68,6 @@ class PublicConfigView(APIView):
         return Response(
             {
                 "currency": settings.PAYMENT_CURRENCY,
-                "payment_simulator": settings.PAYMENT_SIMULATOR_ENABLED,
                 "booking": {
                     "min_lead_minutes": settings.BOOKING_MIN_LEAD_TIME_MINUTES,
                     "max_advance_days": settings.BOOKING_MAX_ADVANCE_DAYS,

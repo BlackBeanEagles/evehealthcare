@@ -85,3 +85,12 @@ class TestJsonLogging:
         assert payload["level"] == "INFO"
         assert payload["request_id"] == "req-abc"
         assert payload["payment_reference"] == "PAY-1"
+
+
+def test_the_public_config_endpoint(api_client, settings):
+    body = api_client.get(reverse("v1:config")).json()
+
+    assert body["booking"]["min_lead_minutes"] == settings.BOOKING_MIN_LEAD_TIME_MINUTES
+    assert body["booking"]["cancellation_cutoff_hours"] == settings.BOOKING_CANCELLATION_CUTOFF_HOURS
+    assert body["currency"] == "INR"
+    assert "payment_simulator" not in body

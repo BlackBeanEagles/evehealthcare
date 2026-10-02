@@ -284,3 +284,68 @@ class TestReconciliation:
         PaymentFactory(booking=booking, status=PaymentStatus.PENDING)
 
         assert reconcile_stale_payments(older_than_minutes=30) == 0
+
+
+class TestPendingPayments:
+    """outcome="pending": the provider accepts the charge and confirms it
+    later through the webhook (a UPI-collect-style asynchronous payment)."""
+
+    @pytest.fixture
+    def pending(self, auth_client, booking):
+        response = auth_client.post(PAYMENTS, {"booking": booking.reference, "outcome": "pending"})
+        assert response.status_code == 201
+        return response.json()
+
+    def test_a_pending_charge_waits_for_the_webhook(self, pending, booking):
+        assert pending["status"] == PaymentStatus.PENDING
+        assert pending["provider_reference"].startswith("sim_pay_")
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.PENDING
+
+    def test_a_second_charge_is_refused_while_one_is_pending(self, auth_client, pending, booking):
+        response = auth_client.post(PAYMENTS, {"booking": booking.reference, "outcome": "success"})
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "payment_in_progress"
+
+    def test_the_webhook_confirms_it_exactly_once(self, pending, booking, post_webhook):
+        event = {
+            "id": "evt_pending_confirm",
+            "type": "payment.succeeded",
+            "data": {"provider_reference": pending["provider_reference"], "amount": pending["amount"]},
+        }
+
+        results = [post_webhook(event).json() for _ in range(3)]
+
+        assert [r["duplicate"] for r in results] == [False, True, True]
+        booking.refresh_from_db()
+        assert booking.status == BookingStatus.CONFIRMED
+        assert booking.status_changes.filter(to_status=BookingStatus.CONFIRMED).count() == 1
+
+
+class TestThrottleScopes:
+    def test_only_charging_counts_against_the_payments_rate(
+        self, auth_client, user, offering, monkeypatch
+    ):
+        """Reads (a page re-checking payment status) must not use up the
+        tight rate reserved for moving money."""
+        from rest_framework.throttling import ScopedRateThrottle
+
+        monkeypatch.setattr(
+            ScopedRateThrottle,
+            "THROTTLE_RATES",
+            {**ScopedRateThrottle.THROTTLE_RATES, "payments": "2/min"},
+        )
+
+        reads = [auth_client.get(PAYMENTS).status_code for _ in range(4)]
+        writes = [
+            auth_client.post(
+                PAYMENTS,
+                {"booking": BookingFactory(user=user, centre_test=offering).reference,
+                 "outcome": "success"},
+            ).status_code
+            for _ in range(3)
+        ]
+
+        assert reads == [200, 200, 200, 200]
+        assert writes[-1] == 429

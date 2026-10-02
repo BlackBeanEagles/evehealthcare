@@ -225,10 +225,6 @@ PAYMENT_WEBHOOK_TOLERANCE_SECONDS = env_int("PAYMENT_WEBHOOK_TOLERANCE_SECONDS",
 PAYMENT_WEBHOOK_REQUIRE_SIGNATURE = env_bool("PAYMENT_WEBHOOK_REQUIRE_SIGNATURE", True)
 PAYMENT_WEBHOOK_MAX_RETRIES = env_int("PAYMENT_WEBHOOK_MAX_RETRIES", 5)
 PAYMENT_WEBHOOK_RETRY_BACKOFF_SECONDS = env_int("PAYMENT_WEBHOOK_RETRY_BACKOFF_SECONDS", 10)
-# Demo-only "payment provider simulator": lets a signed-in user fire signed
-# webhooks at their own payments from the UI. On with DEBUG, off otherwise;
-# it signs with the real webhook secret, so it must never be on in production.
-PAYMENT_SIMULATOR_ENABLED = env_bool("PAYMENT_SIMULATOR_ENABLED", DEBUG)
 
 # -------------------------------------------------------------------------- logging
 LOG_LEVEL = env("LOG_LEVEL", "INFO")

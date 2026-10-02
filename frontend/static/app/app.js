@@ -16,7 +16,6 @@ const AUTH_KEY = "eve.auth";
  */
 let CONFIG = {
   currency: "INR",
-  payment_simulator: false,
   booking: { min_lead_minutes: 30, max_advance_days: 90, cancellation_cutoff_hours: 2 },
 };
 
@@ -691,8 +690,6 @@ document.addEventListener("click", async (e) => {
   }
 
   if (action === "cancel") return openCancelModal(el.dataset.ref);
-
-  if (action === "simulate") return runSimulation(el);
 });
 
 window.addEventListener("hashchange", render);
@@ -1392,7 +1389,7 @@ function openPayModal(booking, { onClose } = {}) {
     const detail = ok
       ? `Your appointment on ${esc(fmtDateTime(booking.scheduled_for))} is confirmed.`
       : waiting
-        ? "The provider accepted the request and will confirm it through our webhook. On the booking page, the simulator plays the provider."
+        ? "The provider accepted the request and will confirm it through our webhook. Your booking is confirmed the moment that arrives."
         : esc(p.failure_reason || "The payment provider declined the charge.");
     openModal(
       `
@@ -1613,166 +1610,6 @@ function lifecycleDiagram(b) {
     </svg>`;
 }
 
-/* ─────────────────────────── provider simulator ────────────────────────── */
-
-/** Simulation runs per booking, newest first. Survives re-renders. */
-const simLog = new Map();
-/** The chosen deliveries-per-event, kept across re-renders. */
-let simDeliveries = 3;
-
-const DELIVERY_OUTCOMES = {
-  booking_confirmed: ["ok", "Processed: booking confirmed"],
-  booking_failed: ["ok", "Processed: booking marked as payment failed"],
-  already_success: ["ok", "Processed: already paid, nothing to change"],
-  already_failed: ["ok", "Processed: already declined, nothing to change"],
-  conflicting_outcome_ignored: ["refused", "Refused: payment already settled, the first outcome wins"],
-  refund_required: ["refused", "Recorded: booking was cancelled, refund flagged"],
-  booking_already_terminal: ["refused", "Recorded: booking already closed"],
-  queued: ["queued", "Accepted: queued for the background worker"],
-  processing_failed: ["error", "Processing failed: stored and scheduled for retry"],
-};
-
-function describeDelivery(d) {
-  if (d.http_status >= 400) return ["error", `Rejected (HTTP ${d.http_status})`];
-  if (d.duplicate) return ["dup", "Duplicate: already received, not processed again"];
-  return DELIVERY_OUTCOMES[d.result] ?? ["ok", d.result || "Processed"];
-}
-
-function simRun(run) {
-  const processed = run.deliveries.filter((d) => !d.duplicate && d.http_status < 400).length;
-  const after = run.final?.booking_status ?? run.booking_status_after;
-  const changed = run.booking_status_before !== after;
-  const final = run.final ? DELIVERY_OUTCOMES[run.final.result] : null;
-  return `
-    <div class="sim-run">
-      <div class="sim-run-head">
-        <span class="sim-type ${run.event_type === "payment.succeeded" ? "ok" : "refused"}">${esc(run.event_type)}</span>
-        <span class="code" title="${esc(run.event_id)}">${esc(run.event_id.slice(0, 16))}…</span>
-        <span class="muted">× ${run.deliveries.length} · handled ${processed === 1 ? "once" : `${processed}×`}</span>
-      </div>
-      <ol class="sim-deliveries">
-        ${run.deliveries
-          .map((d) => {
-            const [kind, text] = describeDelivery(d);
-            return `<li class="${kind}"><span class="n">#${d.attempt}</span><span class="http">${d.http_status}</span><span>${esc(text)}</span></li>`;
-          })
-          .join("")}
-        ${final ? `<li class="${final[0]}"><span class="n">↳</span><span class="http">worker</span><span>${esc(final[1])}</span></li>` : ""}
-      </ol>
-      <div class="sim-outcome">
-        Booking ${changed ? `${chip(run.booking_status_before)} → ${chip(after)}` : `unchanged ${chip(after)}`}
-      </div>
-    </div>`;
-}
-
-function simulatorCard(b, target) {
-  if (!CONFIG.payment_simulator || !target) return "";
-  const runs = simLog.get(b.reference) ?? [];
-  return `
-    <section class="card pad sim" aria-labelledby="sim-title">
-      <div class="sim-head">
-        <div>
-          <p class="eyebrow">Demo mode</p>
-          <h3 id="sim-title">Payment provider simulator</h3>
-        </div>
-        <span class="chip lilac plain">Signed · real webhook endpoint</span>
-      </div>
-      <p class="sim-lede">
-        Plays the payment provider calling <span class="code">POST /payments/webhook/</span> about
-        <span class="code">${esc(target.reference)}</span> ${chip(target.status, PAYMENT_STATUS)}.
-        Each event is signed on the server with the real secret and goes through the real endpoint.
-        Send one several times and watch it apply exactly once.
-      </p>
-      <div class="sim-controls">
-        <fieldset class="choices">
-          <legend>Deliver each event</legend>
-          ${[1, 2, 3, 5].map((n) => `<label class="choice"><input type="radio" name="sim-deliveries" value="${n}" ${n === simDeliveries ? "checked" : ""}><span>${n}×</span></label>`).join("")}
-        </fieldset>
-        <div class="actions">
-          <button class="btn primary" data-action="simulate" data-outcome="success"
-            data-payment="${esc(target.reference)}" data-booking="${esc(b.reference)}">Send “payment succeeded”</button>
-          <button class="btn danger" data-action="simulate" data-outcome="failure"
-            data-payment="${esc(target.reference)}" data-booking="${esc(b.reference)}">Send “payment failed”</button>
-        </div>
-      </div>
-      <div class="sim-log" aria-live="polite">
-        ${runs.length ? runs.map(simRun).join("") : `<p class="muted sim-empty">${
-          target.status === "PENDING"
-            ? "No simulated deliveries yet. Try sending “payment succeeded” 3× and watch it confirm the booking once."
-            : "This payment is already settled. Send either event to see duplicates recorded and a contradicting outcome refused."
-        }</p>`}
-      </div>
-      <div class="sim-events">
-        <p class="label">Webhook deliveries received for this payment</p>
-        <div id="sim-events" data-payment="${esc(target.reference)}"><p class="muted">Loading…</p></div>
-      </div>
-    </section>`;
-}
-
-function webhookEventsTable(events) {
-  if (!events.length) return `<p class="muted">None yet.</p>`;
-  return `
-    <div class="table-wrap">
-      <table class="list compact">
-        <thead><tr><th>Event</th><th>Type</th><th class="num">Delivered</th><th>Status</th><th>What it did</th></tr></thead>
-        <tbody>
-          ${events
-            .map(
-              (e) => `
-            <tr>
-              <td><span class="code" title="${esc(e.event_id)}">${esc(e.event_id.slice(0, 12))}…</span></td>
-              <td>${esc(e.event_type.replace("payment.", ""))}</td>
-              <td class="num"><b>${e.delivery_count}×</b></td>
-              <td>${esc(e.status.toLowerCase())}</td>
-              <td class="muted">${esc((DELIVERY_OUTCOMES[e.result]?.[1] ?? e.result) || "Waiting for the worker")}</td>
-            </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>`;
-}
-
-async function runSimulation(button) {
-  const { payment, outcome, booking } = button.dataset;
-  const deliveries = Number($("input[name=sim-deliveries]:checked")?.value || 3);
-  simDeliveries = deliveries;
-  $$("[data-action=simulate]").forEach((b) => (b.disabled = true));
-  busy(button, true, `Delivering ${deliveries}×…`);
-  try {
-    const run = await api(`/payments/${encodeURIComponent(payment)}/simulate-webhook/`, {
-      method: "POST",
-      body: { outcome, deliveries },
-    });
-    const runs = simLog.get(booking) ?? [];
-    runs.unshift(run);
-    simLog.set(booking, runs.slice(0, 5));
-
-    // With a Celery worker the first delivery is only queued: give the
-    // worker a moment and record what it actually did.
-    if (run.deliveries.some((d) => d.result === "queued")) {
-      for (let i = 0; i < 16; i++) {
-        await new Promise((r) => setTimeout(r, 600));
-        const events = await api(`/payments/${encodeURIComponent(payment)}/webhook-events/`);
-        const ev = events.find((e) => e.event_id === run.event_id);
-        if (ev && ev.status !== "RECEIVED") {
-          const fresh = await api(`/bookings/${encodeURIComponent(booking)}/`);
-          run.final = { result: ev.result, booking_status: fresh.status };
-          break;
-        }
-      }
-    }
-    const processed = run.deliveries.filter((d) => !d.duplicate).length;
-    const n = run.deliveries.length;
-    toast(`${n} ${n === 1 ? "delivery" : "deliveries"}, handled ${processed === 1 ? "once" : `${processed}×`}`, "success");
-    await render();
-  } catch (err) {
-    toast(err.message, "error");
-    busy(button, false);
-    $$("[data-action=simulate]").forEach((b) => (b.disabled = false));
-  }
-}
-
 /* ───────────────────────────── booking detail ─────────────────────────── */
 
 async function bookingDetailView({ params: [reference], token }) {
@@ -1789,7 +1626,7 @@ async function bookingDetailView({ params: [reference], token }) {
   const canCancel = b.status !== "CANCELLED";
   const statusCallout = awaitingProvider
     ? `<div class="callout sky">${ICON.clock}<span><b>Waiting for the payment provider</b> to confirm ${esc(latest.reference)}.
-        ${CONFIG.payment_simulator ? "Play the provider with the simulator below." : "This usually takes a few seconds."}</span></div>`
+        This usually takes a few seconds.</span></div>`
     : {
         PENDING: `<div class="callout">${ICON.info}<span>Your slot is held but not confirmed until you pay.</span></div>`,
         FAILED: `<div class="callout coral">${ICON.info}<span>The last payment was declined. Your slot is still held, so try again.</span></div>`,
@@ -1834,7 +1671,6 @@ async function bookingDetailView({ params: [reference], token }) {
             </div>
           </div>
         </article>
-        ${simulatorCard(b, latest)}
       </div>
 
       <div class="stack" style="--gap:24px">
@@ -1888,12 +1724,6 @@ async function bookingDetailView({ params: [reference], token }) {
       </div>
     </div>`
   );
-
-  const eventsBox = $("#sim-events");
-  if (eventsBox) {
-    const events = await api(`/payments/${encodeURIComponent(eventsBox.dataset.payment)}/webhook-events/`);
-    if (token === renderToken) eventsBox.innerHTML = webhookEventsTable(events);
-  }
 }
 
 /* ═══════════════════════════════ payments ════════════════════════════════ */
