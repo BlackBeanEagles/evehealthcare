@@ -122,20 +122,25 @@ the whole product at <http://localhost:8000/>. Log in with the demo patient
    model made visible.
 3. **Book:** choose a day and a 30-minute slot inside the centre's opening
    hours. Slots inside the 30-minute lead window are disabled.
-4. **Pay:** choose a method and the simulated outcome: approve, decline,
-   random, or **approve later, by webhook** (like a UPI collect request, where
-   the charge waits for the provider's callback). Each attempt carries its own
-   `Idempotency-Key`, so a double-click or a flaky retry can never charge
-   twice. After a decline, "Try again" starts a fresh attempt.
+4. **Pay:** choose a method and pay. The simulated gateway behaves like a
+   real one: it approves most payments and declines some
+   (`PAYMENT_SUCCESS_RATE`, 80% by default), so you meet the failure path
+   too. Each attempt carries its own `Idempotency-Key`, so a double-click or a
+   flaky retry can never charge twice. After a decline, "Try again" starts a
+   fresh attempt.
 5. **Play the payment provider** (the part worth trying). Each booking page
    has a **Payment provider simulator** that sends signed webhooks for that
-   booking's payment, as many times as you like. Send "payment succeeded" 3×
-   and the log shows one delivery processed and two recognised as duplicates.
-   The booking is confirmed once, and the webhook table records the event as
-   delivered 3×. Then send "payment failed": it is refused because the first
-   outcome wins, and the booking stays confirmed. The panel signs events on the
-   server and pushes them through the real `POST /payments/webhook/` view, so
-   what you see is the production code path, not a mock of it.
+   booking's payment, as many times as you like. After paying, send
+   "payment succeeded" 3×. The log shows one delivery handled (the payment had
+   already settled, so it changes nothing) and two recognised as duplicates,
+   and the webhook table records the event as delivered 3×. Then send
+   "payment failed": it is refused because the first outcome wins, and the
+   booking stays confirmed. The panel signs events on the server and pushes
+   them through the real `POST /payments/webhook/` view, so what you see is
+   the production code path, not a mock of it. To watch a webhook *confirm* a
+   waiting booking, create the payment through the API with
+   `"outcome": "pending"` (a UPI-collect-style charge). The booking then waits,
+   and the simulator confirms it exactly once.
 6. **Track:** each booking shows its status, a **lifecycle diagram** of the
    state machine with the path this booking took drawn in bold, its full
    transition history (who changed it: you, the payment, or the provider
@@ -663,8 +668,10 @@ inline task execution. Behaviour is identical, only the timing differs.
    any number of patients may book 10:00. Only *one patient* booking the *same
    offering* twice at the same time is prevented. Real capacity needs a slot
    table and is a bigger design than this brief calls for.
-2. **The payment outcome is controllable.** `"outcome": "success" | "failure"`
-   forces the result; otherwise `PAYMENT_SUCCESS_RATE` decides. Random-only
+2. **The payment outcome is controllable through the API, not the UI.**
+   `"outcome": "success" | "failure" | "pending"` forces the result; otherwise
+   `PAYMENT_SUCCESS_RATE` decides. The web app never sends it, because a
+   patient doesn't get to choose whether their payment succeeds. Random-only
    outcomes would make the test suite non-deterministic and make a reviewer
    retry until the dice cooperate.
 3. **Both settlement paths exist, and the webhook is authoritative.**

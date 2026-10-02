@@ -1346,15 +1346,7 @@ function openPayModal(booking, { onClose } = {}) {
             ${METHODS.map(([v, l], i) => `<label class="choice"><input type="radio" name="method" value="${v}" ${i === 0 ? "checked" : ""}><span>${l}</span></label>`).join("")}
           </fieldset>
 
-          <fieldset class="choices">
-            <legend>Simulated outcome</legend>
-            <label class="choice"><input type="radio" name="outcome" value="success" checked><span>Approve</span></label>
-            <label class="choice"><input type="radio" name="outcome" value="failure"><span>Decline</span></label>
-            <label class="choice"><input type="radio" name="outcome" value="random"><span>Let the gateway decide</span></label>
-            ${CONFIG.payment_simulator ? `<label class="choice"><input type="radio" name="outcome" value="pending"><span>Approve later, by webhook</span></label>` : ""}
-          </fieldset>
-
-          <p class="sim-note">${ICON.shield}This is a simulated gateway. No real money moves.</p>
+          <p class="sim-note">${ICON.shield}Simulated gateway: like a real one, it approves most payments and declines some. No real money moves.</p>
           ${error ? `<p class="form-error" role="alert">${esc(error)}</p>` : ""}
         </div>
         <div class="modal-foot">
@@ -1377,7 +1369,9 @@ function openPayModal(booking, { onClose } = {}) {
         const payment = await api("/payments/", {
           method: "POST",
           headers: { "Idempotency-Key": key },
-          body: { booking: booking.reference, method: form.method.value, outcome: form.outcome.value },
+          // No outcome is sent: the simulated gateway decides, as a real one
+          // would. (The API still accepts `outcome` for tests and API docs.)
+          body: { booking: booking.reference, method: form.method.value },
         });
         drawResult(payment);
       } catch (err) {
