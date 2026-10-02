@@ -98,27 +98,7 @@ DATABASE_URL=postgresql://eve:eve@localhost:5432/eve pytest   # full suite on Po
 
 ### System overview
 
-```mermaid
-flowchart LR
-    Browser["Web app<br/>(vanilla JS, served at /)"]
-    Client["API client<br/>(curl, Swagger UI)"]
-    Provider["Payment provider<br/>(simulated)"]
-
-    subgraph Docker["docker compose"]
-        Web["web<br/>Django + DRF on gunicorn"]
-        Worker["worker<br/>Celery"]
-        DB[("PostgreSQL<br/>source of truth")]
-        Redis[("Redis<br/>cache + task broker")]
-    end
-
-    Browser -- "HTTPS + JWT" --> Web
-    Client -- "HTTPS + JWT" --> Web
-    Provider -- "signed webhook" --> Web
-    Web -- "SQL, row locks" --> DB
-    Web -- "cache reads / enqueue" --> Redis
-    Redis -- "tasks" --> Worker
-    Worker -- "SQL, row locks" --> DB
-```
+![System architecture: the web app, API clients and a simulated payment provider call one Django API in docker compose, which uses PostgreSQL, Redis and a Celery worker](docs/architecture.svg)
 
 | Component | Role |
 | --- | --- |
@@ -130,21 +110,21 @@ flowchart LR
 
 ### Code structure: thin views, rules in services
 
-Every request passes through the same layers. Business rules live in one
-place (`services.py`), so an HTTP request, a Celery task and a management
-command all run the same logic.
+Every request passes through the four layers numbered in the diagram, and
+the business rules live in exactly one of them:
 
-```mermaid
-flowchart TB
-    R["HTTP request"] --> M["Middleware<br/>request ID · structured access log"]
-    M --> V["View (DRF)<br/>JWT auth · permissions · rate limit · validation"]
-    V --> S["Service layer: apps/*/services.py<br/>state machine · idempotency · business rules"]
-    T["Celery task"] --> S
-    C["Management command"] --> S
-    S --> G["Gateway interface<br/>apps/payments/gateway.py"]
-    S --> D[("Models / PostgreSQL<br/>constraints · row locks")]
-    V -. "any exception" .-> E["Error handler<br/>one JSON envelope with a stable code"]
-```
+1. **Middleware** gives each request an ID and writes one structured log line.
+2. **Views** (Django REST Framework) check the JWT, permissions and rate limit,
+   validate input, then hand off. They contain no business rules.
+3. **Services** (`apps/*/services.py`) hold every rule: the booking state
+   machine, idempotent payment settlement, webhook processing. Celery tasks
+   and management commands call the same services, so there is one
+   implementation of each rule.
+4. **Models** map to PostgreSQL, where constraints and row locks back up the
+   rules.
+
+Any exception, at any layer, comes back as one JSON error shape with a stable
+code (see [Errors](#errors)).
 
 ```
 config/            settings (+ test settings), URLs, Celery app, env parsing
@@ -161,7 +141,12 @@ tests/             226 tests
 docker/            container entrypoint: wait for DB → migrate → seed → run
 ```
 
-### Flow 1: booking and paying
+### Workflow 1: booking and paying
+
+![Booking and payment flow: compare prices, book a slot with the price saved, pay with the booking row locked; approved confirms the booking, declined fails it and allows a retry](docs/booking-payment-flow.svg)
+
+<details>
+<summary>Step-by-step sequence (what the API and database do)</summary>
 
 ```mermaid
 sequenceDiagram
@@ -185,7 +170,14 @@ sequenceDiagram
     API-->>P: 201 {payment status, booking status}
 ```
 
-### Flow 2: the webhook (idempotent)
+</details>
+
+### Workflow 2: the idempotent webhook
+
+![Idempotent webhook flow: verify the signature, store the event under a unique ID, apply a new event once, count and ignore a duplicate](docs/webhook-flow.svg)
+
+<details>
+<summary>Step-by-step sequence (including the Celery worker)</summary>
 
 ```mermaid
 sequenceDiagram
@@ -212,6 +204,8 @@ sequenceDiagram
     end
     Note over W,DB: On failure the event is marked FAILED and<br/>retried with exponential backoff
 ```
+
+</details>
 
 ### Key design decisions
 

@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="566" viewBox="0 0 960 566" role="img" aria-labelledby="title desc">
+  <title id="title">EVE Diagnostics system architecture</title>
+  <desc id="desc">The web app, API clients and a simulated payment provider call one Django API running in docker compose. The API passes each request through middleware, views, services and models, stores data in PostgreSQL, and uses Redis as a cache and task broker for a Celery worker that processes webhooks and writes to PostgreSQL.</desc>
+  <defs>
+    <style>
+      .h { font: 700 22px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #1C1A2E; }
+      .sub { font: 400 13.5px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #6B6880; }
+      .t { font: 700 15px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #1C1A2E; }
+      .s { font: 400 12.5px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #6B6880; }
+      .l { font: 700 13px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #3B2DA6; }
+      .d { font: 400 11.5px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #6B6880; }
+      .n { font: 700 11px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #B3ABE8; }
+      .cap { font: 700 11px "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; fill: #8A8599; letter-spacing: .12em; }
+      .edge { fill: none; stroke: #8A8599; stroke-width: 1.6; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1 L9 5 L1 9" fill="none" stroke="#8A8599" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1C1A2E" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="959" height="565" rx="18" fill="#FBF7F1" stroke="#E9E3D8"/>
+  <text class="h" x="40" y="50">System architecture</text>
+  <text class="sub" x="40" y="74">Every request enters one Django API. PostgreSQL is the source of truth; Redis caches reads and queues work for the Celery worker.</text>
+
+  <!-- clients -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="150" width="230" height="70" rx="12" fill="#FFFFFF" stroke="#E2DACC"/>
+    <rect x="40" y="245" width="230" height="70" rx="12" fill="#FFFFFF" stroke="#E2DACC"/>
+    <rect x="40" y="380" width="230" height="70" rx="12" fill="#FFFFFF" stroke="#E2DACC"/>
+  </g>
+  <circle cx="70" cy="185" r="15" fill="#FFF1D9"/>
+  <rect x="62" y="179" width="16" height="13" rx="2.5" fill="none" stroke="#9A6A0E" stroke-width="1.4"/>
+  <line x1="62" y1="183" x2="78" y2="183" stroke="#9A6A0E" stroke-width="1.4"/>
+  <text class="t" x="96" y="181">Web app</text>
+  <text class="s" x="96" y="201">Patients' browser · JWT</text>
+
+  <circle cx="70" cy="280" r="15" fill="#E1F3FC"/>
+  <path d="M66 274 L61 280 L66 286 M74 274 L79 280 L74 286" fill="none" stroke="#155E86" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="t" x="96" y="276">API client</text>
+  <text class="s" x="96" y="296">Swagger UI · curl · JWT</text>
+
+  <circle cx="70" cy="415" r="15" fill="#FFE6E1"/>
+  <rect x="61" y="409" width="18" height="12" rx="2" fill="none" stroke="#A8321F" stroke-width="1.4"/>
+  <line x1="61" y1="413.5" x2="79" y2="413.5" stroke="#A8321F" stroke-width="1.4"/>
+  <text class="t" x="96" y="411">Payment provider</text>
+  <text class="s" x="96" y="431">Sends signed webhooks</text>
+
+  <!-- docker compose boundary -->
+  <rect x="320" y="110" width="600" height="400" rx="16" fill="#FFFFFF" fill-opacity="0.55" stroke="#CFC5B5" stroke-dasharray="6 5"/>
+  <text class="cap" x="342" y="136">DOCKER COMPOSE</text>
+
+  <!-- API card -->
+  <rect x="345" y="150" width="270" height="300" rx="14" fill="#FFFFFF" filter="url(#shadow)"/>
+  <path d="M359 150 H601 A14 14 0 0 1 615 164 V208 H345 V164 A14 14 0 0 1 359 150 Z" fill="#ECE8FF"/>
+  <rect x="345" y="150" width="270" height="300" rx="14" fill="none" stroke="#CFC6F7"/>
+  <text class="t" x="365" y="177" style="fill:#3B2DA6">Django API</text>
+  <text class="s" x="365" y="197">DRF on gunicorn · stateless</text>
+
+  <g>
+    <rect x="361" y="220" width="238" height="44" rx="8" fill="#F7F5FF" stroke="#E4DFFC"/>
+    <text class="l" x="377" y="238">Middleware</text>
+    <text class="d" x="377" y="254">Request ID · structured logs</text>
+    <text class="n" x="585" y="246" text-anchor="end">1</text>
+
+    <rect x="361" y="274" width="238" height="44" rx="8" fill="#F7F5FF" stroke="#E4DFFC"/>
+    <text class="l" x="377" y="292">Views</text>
+    <text class="d" x="377" y="308">JWT · permissions · rate limits</text>
+    <text class="n" x="585" y="300" text-anchor="end">2</text>
+
+    <rect x="361" y="328" width="238" height="44" rx="8" fill="#F7F5FF" stroke="#E4DFFC"/>
+    <text class="l" x="377" y="346">Services</text>
+    <text class="d" x="377" y="362">State machine · idempotency</text>
+    <text class="n" x="585" y="354" text-anchor="end">3</text>
+
+    <rect x="361" y="382" width="238" height="44" rx="8" fill="#F7F5FF" stroke="#E4DFFC"/>
+    <text class="l" x="377" y="400">Models</text>
+    <text class="d" x="377" y="416">Constraints · row locks</text>
+    <text class="n" x="585" y="408" text-anchor="end">4</text>
+  </g>
+
+  <!-- data stores + worker -->
+  <g filter="url(#shadow)">
+    <rect x="665" y="150" width="230" height="84" rx="12" fill="#FFFFFF" stroke="#BFE6DE"/>
+    <rect x="665" y="265" width="230" height="84" rx="12" fill="#FFFFFF" stroke="#BFE6DE"/>
+    <rect x="665" y="380" width="230" height="84" rx="12" fill="#FFFFFF" stroke="#CFC6F7"/>
+  </g>
+
+  <circle cx="693" cy="192" r="16" fill="#DBF3EF"/>
+  <ellipse cx="693" cy="186" rx="7" ry="2.6" fill="none" stroke="#0D6B61" stroke-width="1.4"/>
+  <path d="M686 186 V198 A7 2.6 0 0 0 700 198 V186 M686 192 A7 2.6 0 0 0 700 192" fill="none" stroke="#0D6B61" stroke-width="1.4"/>
+  <text class="t" x="721" y="181" style="fill:#0D6B61">PostgreSQL</text>
+  <text class="s" x="721" y="200">Source of truth</text>
+  <text class="s" x="721" y="217">Enforces the rules</text>
+
+  <circle cx="693" cy="307" r="16" fill="#DBF3EF"/>
+  <path d="M685 301 H701 M685 307 H701 M685 313 H701" fill="none" stroke="#0D6B61" stroke-width="1.6" stroke-linecap="round"/>
+  <text class="t" x="721" y="296" style="fill:#0D6B61">Redis</text>
+  <text class="s" x="721" y="315">Catalogue cache</text>
+  <text class="s" x="721" y="332">Celery task broker</text>
+
+  <circle cx="693" cy="422" r="16" fill="#ECE8FF"/>
+  <circle cx="693" cy="422" r="3.2" fill="none" stroke="#3B2DA6" stroke-width="1.5"/>
+  <circle cx="693" cy="422" r="7.5" fill="none" stroke="#3B2DA6" stroke-width="1.5" stroke-dasharray="3 2.2"/>
+  <text class="t" x="721" y="411" style="fill:#3B2DA6">Celery worker</text>
+  <text class="s" x="721" y="430">Processes webhooks</text>
+  <text class="s" x="721" y="447">Retries with backoff</text>
+
+  <!-- edges -->
+  <line class="edge" x1="270" y1="185" x2="342" y2="185" marker-end="url(#arrow)"/>
+  <line class="edge" x1="270" y1="280" x2="342" y2="280" marker-end="url(#arrow)"/>
+  <line class="edge" x1="270" y1="415" x2="342" y2="415" marker-end="url(#arrow)"/>
+  <line class="edge" x1="615" y1="192" x2="662" y2="192" marker-end="url(#arrow)"/>
+  <line class="edge" x1="615" y1="307" x2="662" y2="307" marker-end="url(#arrow)"/>
+  <line class="edge" x1="780" y1="349" x2="780" y2="377" marker-end="url(#arrow)"/>
+  <path class="edge" d="M895 422 H908 V192 H898" marker-end="url(#arrow)"/>
+
+  <!-- legend -->
+  <rect x="40" y="530" width="13" height="13" rx="3" fill="#ECE8FF" stroke="#B9AEF5"/>
+  <text class="s" x="61" y="541">Our services</text>
+  <rect x="160" y="530" width="13" height="13" rx="3" fill="#DBF3EF" stroke="#9ED8CC"/>
+  <text class="s" x="181" y="541">Data stores</text>
+  <rect x="276" y="530" width="13" height="13" rx="3" fill="#FFFFFF" stroke="#E2DACC"/>
+  <text class="s" x="297" y="541">External callers</text>
+  <text class="s" x="920" y="541" text-anchor="end">Arrows point from caller to callee</text>
+</svg>
