@@ -35,6 +35,7 @@ JWT · Redis · Celery · Docker. Ships with a small web frontend.
 8. [Configuration](#8-configuration)
 9. [Assumptions](#9-assumptions)
 10. [What I would improve with more time](#10-what-i-would-improve-with-more-time)
+11. [Web app screenshots](#web-app-screenshots)
 
 ---
 
@@ -669,3 +670,48 @@ with no build step, talks to the same documented API, and works on phones.
 - Split settings into `base / dev / prod` once there is a real deployment.
 - Move web-app tokens from `localStorage` to httpOnly cookies, and add
   browser tests (Playwright) for the booking flow.
+
+---
+
+## Web app screenshots
+
+The web app is served by the same Django server at `/`. Run the project, open
+<http://localhost:8000/> and log in as the demo patient. The backend is the
+focus; the web app is a thin client over the same documented API.
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/screenshots/login.png" alt="Log in: JWT auth, with a one-click fill for the seeded demo patient"><br><sub><b>Log in:</b> JWT auth, with a one-click fill for the seeded demo patient</sub></td>
+    <td width="50%" valign="top"><img src="docs/screenshots/explore.png" alt="Explore: test search, popular tests and partner centres"><br><sub><b>Explore:</b> test search, popular tests and partner centres</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/screenshots/tests.png" alt="Test catalogue: filter by category, with report times"><br><sub><b>Test catalogue:</b> filter by category, with report times</sub></td>
+    <td width="50%" valign="top"><img src="docs/screenshots/test-detail.png" alt="Compare prices: the same test at every centre, cheapest first"><br><sub><b>Compare prices:</b> the same test at every centre, cheapest first</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/screenshots/centre.png" alt="Centre page: opening hours and that centre's own price list"><br><sub><b>Centre page:</b> opening hours and that centre's own price list</sub></td>
+    <td width="50%" valign="top"><img src="docs/screenshots/booking.png" alt="Book a slot: only times inside the centre's opening hours"><br><sub><b>Book a slot:</b> only times inside the centre's opening hours</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/screenshots/pay.png" alt="Pay: the booking is PENDING with its price saved until payment"><br><sub><b>Pay:</b> the booking is PENDING with its price saved until payment</sub></td>
+    <td width="50%" valign="top"><img src="docs/screenshots/payment-result.png" alt="Payment received: the booking moves to CONFIRMED"><br><sub><b>Payment received:</b> the booking moves to CONFIRMED</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/screenshots/my-bookings.png" alt="My bookings: grouped by upcoming and past, filter by status"><br><sub><b>My bookings:</b> grouped by upcoming and past, filter by status</sub></td>
+    <td width="50%" valign="top"><img src="docs/screenshots/booking-detail.png" alt="Booking detail: the state machine, with this booking's path in bold"><br><sub><b>Booking detail:</b> the state machine, with this booking's path in bold</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/screenshots/payments.png" alt="Payments: every attempt, including declines with the reason"><br><sub><b>Payments:</b> every attempt, including declines with the reason</sub></td>
+    <td width="50%" valign="top"><img src="docs/screenshots/duplicate-booking.png" alt="Edge case: booking the same test at the same time is refused"><br><sub><b>Edge case:</b> booking the same test at the same time is refused</sub></td>
+  </tr>
+</table>
+
+**On a phone** (below 900px the top menu becomes a bottom tab bar), and the
+**Swagger UI** at `/api/docs/`, where every endpoint can be tried:
+
+<table>
+  <tr>
+    <td width="32%" valign="top"><img src="docs/screenshots/mobile.png" alt="My bookings on a phone, with the bottom tab bar"></td>
+    <td width="68%" valign="top"><img src="docs/screenshots/swagger.png" alt="Swagger UI listing the API endpoints"></td>
+  </tr>
+</table>
