@@ -1,231 +1,346 @@
-# EVE Healthcare — Diagnostics Booking API
+# EVE Healthcare: Diagnostics Booking API
 
-A backend for booking diagnostic tests at partner centres and paying for them
-through a **simulated** payment provider with an **idempotent webhook**.
+A backend service for booking diagnostic tests at partner centres and paying
+for them through a **simulated payment provider** with an **idempotent
+webhook**.
 
-Django 4.2 · Django REST Framework · PostgreSQL · JWT · Redis · Celery · Docker · web frontend · 226 tests
+**Stack:** Python 3.12 · Django 4.2 · Django REST Framework · PostgreSQL ·
+JWT · Redis · Celery · Docker. Ships with a small web frontend.
+
+**Quality:** 226 tests at 95% coverage, CI on PostgreSQL, OpenAPI docs.
 
 ---
+
+## The brief, and where each part lives
+
+| Requirement | Implementation | Proof |
+| --- | --- | --- |
+| **1. Authentication**: signup, login, JWT, validation | `apps/accounts`: email login, JWT access + rotating refresh tokens, logout blacklists | `tests/test_auth.py` |
+| **2. Centres & tests**: name, location, tests, price | `apps/catalog`: price lives on the centre↔test pair, so each centre sets its own | `tests/test_catalog.py` |
+| **3. Bookings**: patient, test, centre, time, amount, status | `apps/bookings`: amount snapshotted, explicit `PENDING / CONFIRMED / FAILED / CANCELLED` state machine | `tests/test_bookings.py`, `tests/test_state_machine.py` |
+| **4. `POST /payments/`**: SUCCESS or FAILED, updates the booking | `apps/payments`: simulated gateway behind a swappable interface | `tests/test_payments.py` |
+| **5. `POST /payments/webhook/`**: idempotent | Signed deliveries, unique event IDs, row locks, first outcome wins | `tests/test_webhooks.py`, `tests/test_concurrency.py` |
+| **6. Edge cases** | Invalid input, replays, bad IDs, failed payments, cross-user access | [Edge cases](#6-edge-cases) |
+| **Bonus**: all nine | Redis cache · Celery · Docker · Swagger · tests · JSON logs · pagination · rate limits · webhook retries | [Bonus engineering](#bonus-engineering) |
 
 ## Contents
 
-- [Quick start](#quick-start)
-- [What it does](#what-it-does)
-- [Frontend](#frontend)
-- [API reference](#api-reference)
-- [Walk through the whole flow](#walk-through-the-whole-flow-copy-paste)
-- [Database design](#database-design)
-- [How idempotency is guaranteed](#how-idempotency-is-guaranteed)
-- [Edge cases handled](#edge-cases-handled)
-- [Project layout](#project-layout)
-- [Tests](#tests)
-- [Configuration](#configuration)
-- [Assumptions](#assumptions)
-- [What I would do with more time](#what-i-would-do-with-more-time)
+1. [Run it locally](#1-run-it-locally)
+2. [Architecture](#2-architecture)
+3. [API reference and example requests](#3-api-reference-and-example-requests)
+4. [Database design](#4-database-design)
+5. [Idempotency and reliability](#5-idempotency-and-reliability)
+6. [Edge cases](#6-edge-cases)
+7. [Testing](#7-testing)
+8. [Configuration](#8-configuration)
+9. [Assumptions](#9-assumptions)
+10. [What I would improve with more time](#10-what-i-would-improve-with-more-time)
 
 ---
 
-## Quick start
+## 1. Run it locally
 
-### With Docker (recommended — one command)
+### Option A: Docker (one command, recommended)
 
 ```bash
 docker compose up --build
 ```
 
-That starts Postgres, Redis, the API and a Celery worker; migrations run and
-the catalogue is seeded automatically on boot.
+This starts PostgreSQL, Redis, the API and a Celery worker. Migrations run
+and demo data is seeded automatically.
 
-Port 8000, 5432 or 6379 already taken on your machine? Override any of them:
+| Open | URL |
+| --- | --- |
+| Web app | <http://localhost:8000/> |
+| API docs (Swagger) | <http://localhost:8000/api/docs/> |
+| API root | <http://localhost:8000/api/v1/> |
+| Admin | <http://localhost:8000/admin/> |
+| Health check | <http://localhost:8000/health/> |
+
+| Demo account | Email | Password |
+| --- | --- | --- |
+| Patient | `patient@example.com` | `DemoPass123!` |
+| Staff / admin | `admin@example.com` | `AdminPass123!` |
+
+If a port is already in use on your machine, override it:
 
 ```bash
 WEB_PORT=8001 DB_PORT=5433 REDIS_PORT=6380 docker compose up --build
 ```
 
-- **App (frontend): <http://localhost:8000/>**
-- API: <http://localhost:8000/api/v1/>
-- Swagger UI: <http://localhost:8000/api/docs/>
-- Health: <http://localhost:8000/health/>
-- Admin: <http://localhost:8000/admin/>
+### Option B: Without Docker
 
-Seeded accounts:
-
-| Role | Email | Password |
-| --- | --- | --- |
-| Patient | `patient@example.com` | `DemoPass123!` |
-| Staff / admin | `admin@example.com` | `AdminPass123!` |
-
-### Without Docker
-
-Requires Python 3.11+. Postgres is the production target, but SQLite works for
+Requires Python 3.11+. PostgreSQL is the production target; SQLite works for
 a quick look.
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-export DATABASE_URL=postgresql://eve:eve@localhost:5432/eve_diagnostics  # or sqlite:///dev.sqlite3
+export DATABASE_URL=sqlite:///dev.sqlite3               # or postgresql://user:pass@localhost:5432/eve
 python manage.py migrate
 python manage.py seed_catalog
 python manage.py runserver
 ```
 
+Without Redis the app uses an in-memory cache, and without a broker it
+processes webhooks inline. Behaviour is identical; only the timing differs.
+
 ### Run the tests
 
 ```bash
-pytest
-```
-
-No database server needed — the suite defaults to in-memory SQLite. To run the
-identical suite against the real target:
-
-```bash
-DATABASE_URL=postgresql://eve:eve@localhost:5432/eve_diagnostics pytest
+pytest                                                   # in-memory SQLite, no setup
+DATABASE_URL=postgresql://eve:eve@localhost:5432/eve pytest   # full suite on PostgreSQL
 ```
 
 ---
 
-## What it does
+## 2. Architecture
 
-A patient signs up, browses centres and the tests each one offers (**with that
-centre's price**), books a slot, and pays. Payment is simulated: no real
-gateway is integrated. The provider then calls back on a webhook, possibly more
-than once, possibly out of order — and the booking must end up in exactly the
-right state regardless.
+### System overview
+
+```mermaid
+flowchart LR
+    Browser["Web app<br/>(vanilla JS, served at /)"]
+    Client["API client<br/>(curl, Swagger UI)"]
+    Provider["Payment provider<br/>(simulated)"]
+
+    subgraph Docker["docker compose"]
+        Web["web<br/>Django + DRF on gunicorn"]
+        Worker["worker<br/>Celery"]
+        DB[("PostgreSQL<br/>source of truth")]
+        Redis[("Redis<br/>cache + task broker")]
+    end
+
+    Browser -- "HTTPS + JWT" --> Web
+    Client -- "HTTPS + JWT" --> Web
+    Provider -- "signed webhook" --> Web
+    Web -- "SQL, row locks" --> DB
+    Web -- "cache reads / enqueue" --> Redis
+    Redis -- "tasks" --> Worker
+    Worker -- "SQL, row locks" --> DB
+```
+
+| Component | Role |
+| --- | --- |
+| **web** | One Django process serving the REST API, the OpenAPI docs, the admin and the web app. Stateless; scale it horizontally. |
+| **worker** | Celery worker that processes webhook deliveries off the request path, with retries and backoff. |
+| **PostgreSQL** | The source of truth. Correctness rules (no double booking, no double charge, no duplicate webhook) are enforced here with unique and check constraints, not only in Python. |
+| **Redis** | Two jobs: caching catalogue reads, and carrying Celery tasks. Losing it degrades speed, never correctness. |
+| **Payment provider** | Simulated (the brief forbids a real gateway). It answers charges synchronously and calls the webhook, signed with a shared HMAC secret. |
+
+### Code structure: thin views, rules in services
+
+Every request passes through the same layers. Business rules live in one
+place (`services.py`), so an HTTP request, a Celery task and a management
+command all run the same logic.
+
+```mermaid
+flowchart TB
+    R["HTTP request"] --> M["Middleware<br/>request ID · structured access log"]
+    M --> V["View (DRF)<br/>JWT auth · permissions · rate limit · validation"]
+    V --> S["Service layer: apps/*/services.py<br/>state machine · idempotency · business rules"]
+    T["Celery task"] --> S
+    C["Management command"] --> S
+    S --> G["Gateway interface<br/>apps/payments/gateway.py"]
+    S --> D[("Models / PostgreSQL<br/>constraints · row locks")]
+    V -. "any exception" .-> E["Error handler<br/>one JSON envelope with a stable code"]
+```
 
 ```
-signup/login ──▶ browse catalogue ──▶ POST /bookings/  (PENDING, price snapshotted)
-                                              │
-                                              ▼
-                                      POST /payments/   ── simulated charge
-                                              │
-                          ┌───────────────────┴───────────────────┐
-                          ▼                                       ▼
-                   SUCCESS → CONFIRMED                     FAILED → FAILED
-                          │                                       │
-                          │                                  retry payment
-                          ▼                                       │
-             POST /payments/webhook/  ◀── provider callback ◀──────┘
-             (re-asserts the outcome; replays change nothing)
+config/            settings (+ test settings), URLs, Celery app, env parsing
+apps/
+  common/          error envelope, JSON logging, request-ID middleware,
+                   pagination, permissions, row-locking helper, health + config
+  accounts/        user model (email login), signup / login / refresh / logout / me
+  catalog/         centres, tests, priced offerings; cached reads
+  bookings/        Booking + audit trail; the state machine lives in services.py
+  payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
+                   idempotent settlement, Celery tasks, ops commands
+frontend/          the web app (index.html + static/app/app.js, styles.css)
+tests/             226 tests
+docker/            container entrypoint: wait for DB → migrate → seed → run
 ```
+
+### Flow 1: booking and paying
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Patient
+    participant API as Django API
+    participant DB as PostgreSQL
+    participant GW as Payment gateway
+
+    P->>API: POST /bookings/ {offering, scheduled_for}
+    API->>DB: validate slot, snapshot price, INSERT booking (PENDING)
+    API-->>P: 201 {reference, status: PENDING, amount}
+
+    P->>API: POST /payments/ {booking} + Idempotency-Key
+    API->>DB: SELECT booking FOR UPDATE (serialises parallel attempts)
+    API->>DB: re-check the key, refuse if paid / cancelled / in progress
+    API->>DB: INSERT payment (PENDING)
+    API->>GW: charge(amount)
+    GW-->>API: SUCCESS or FAILED
+    API->>DB: lock payment, settle it, move booking to CONFIRMED / FAILED, write audit row
+    API-->>P: 201 {payment status, booking status}
+```
+
+### Flow 2: the webhook (idempotent)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PR as Payment provider
+    participant API as Django API
+    participant DB as PostgreSQL
+    participant Q as Redis queue
+    participant W as Celery worker
+
+    PR->>API: POST /payments/webhook/ (signed, event id evt_123)
+    API->>API: verify HMAC signature + timestamp
+    API->>DB: INSERT webhook_event (event_id is UNIQUE)
+    alt new event
+        API->>Q: enqueue processing
+        API-->>PR: 200 {duplicate: false}
+        Q->>W: process evt_123
+        W->>DB: lock payment row, apply outcome (first outcome wins)
+        W->>DB: move booking through the state machine, mark event PROCESSED
+    else same event delivered again
+        DB-->>API: unique-constraint violation
+        API->>DB: delivery_count + 1 (nothing else changes)
+        API-->>PR: 200 {duplicate: true}
+    end
+    Note over W,DB: On failure the event is marked FAILED and<br/>retried with exponential backoff
+```
+
+### Key design decisions
+
+1. **Rules live in the database, not only in code.** Checks like "is this
+   already paid?" can lose a race between two requests; a unique index cannot.
+   Every money-related invariant has a constraint behind it (see
+   [Database design](#4-database-design)).
+2. **One function settles payments.** The synchronous charge and the webhook
+   both call `apply_payment_outcome()`, which locks the payment row and applies
+   an outcome at most once. Two paths, one set of rules.
+3. **One function changes booking status.** `transition_booking()` enforces
+   the allowed transitions and writes an audit row. No view ever assigns
+   `booking.status` directly.
+4. **Store first, process second.** Each webhook is saved before it's acted
+   on, so a crash can't lose it. The retry task or `replay_failed_webhooks`
+   picks it up.
+5. **The gateway is behind an interface.** Swapping the simulator for Razorpay
+   or Stripe means implementing `charge()` in one module; the services don't
+   change.
+6. **Degrade gracefully.** Without Redis, an in-memory cache is used; without
+   a broker, tasks run inline. Same behaviour, different timing.
 
 ---
 
-## Frontend
+## 3. API reference and example requests
 
-A light-theme web app served by Django at `/`, so `docker compose up` gives you
-the whole product at <http://localhost:8000/>. Log in with the demo patient
-(there is a one-click "Fill in" button) and walk the full flow:
+Interactive docs at **`/api/docs/`** (Swagger) and `/api/redoc/`, schema at
+`/api/schema/`. Everything is under `/api/v1/`. The two paths the brief names,
+`POST /payments/` and `POST /payments/webhook/`, also work at the root.
 
-1. **Explore:** partner centres, filterable by city, plus a test search.
-2. **Compare:** pick a test and see every centre that offers it, cheapest
-   first, with the price spread drawn as a bar. This is the per-centre pricing
-   model made visible.
-3. **Book:** choose a day and a 30-minute slot inside the centre's opening
-   hours. Slots inside the 30-minute lead window are disabled.
-4. **Pay:** choose a method and pay. The simulated gateway behaves like a
-   real one: it approves most payments and declines some
-   (`PAYMENT_SUCCESS_RATE`, 80% by default), so you meet the failure path
-   too. Each attempt carries its own `Idempotency-Key`, so a double-click or a
-   flaky retry can never charge twice. After a decline, "Try again" starts a
-   fresh attempt.
-5. **Track:** each booking shows its status, a **lifecycle diagram** of the
-   state machine with the path this booking took drawn in bold, its full
-   transition history (who changed it: you, the payment, or the provider
-   webhook) and every payment attempt. You can
-   cancel from there.
+### Endpoints
 
-**Design.** A warm paper background, ink for anything you read, and a palette
-of saturated abstract colours (coral, saffron, teal, lilac, sky). Every
-centre, test and booking gets a generated abstract artwork seeded from its
-identifier, so the same centre always has the same "face". Colour carries
-identity; it never carries the text.
+**Auth**
 
-**Implementation.** Plain JavaScript with no framework and no build step, in
-three files under `frontend/`. It is a thin client over the documented API:
-
-- Same origin as the API, so no CORS configuration and no second container.
-- JWT access and refresh tokens. An expired access token is refreshed once,
-  transparently; logout blacklists the refresh token.
-- Every API string passes through an escaping helper before it reaches
-  `innerHTML`.
-- Hash routing. Stale responses from a page you already left are discarded
-  rather than painted over the current one.
-- Static assets ship with content-hashed filenames (`app.01b3e510607d.js`)
-  plus gzip and brotli variants, so a deploy is never served stale from a
-  browser cache.
-- Logging in, rotating tokens or logging out in one tab applies to every open
-  tab.
-- Native `<dialog>` for modals, radio-group chips for day, slot, method and
-  outcome selection, keyboard focus rings, `prefers-reduced-motion`
-  respected. On phones the menu becomes a bottom tab bar.
-- Booking rules (lead time, cancellation cutoff) come from `GET /config/`,
-  so the UI can't drift from what the API enforces.
-
-Tokens live in `localStorage`, which is fine for a demo; production would use
-httpOnly cookies. See the improvements list.
-
----
-
-## API reference
-
-Full interactive docs at `/api/docs/`; machine-readable schema at `/api/schema/`.
-Everything lives under `/api/v1/`. The two paths named literally in the brief,
-`POST /payments/` and `POST /payments/webhook/`, are also mounted at the root
-as aliases onto the same views.
-
-### Auth
-
-| Method | Path | Auth | Description |
+| Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/auth/signup/` | — | Create an account |
-| POST | `/api/v1/auth/login/` | — | Email + password → JWT pair |
-| POST | `/api/v1/auth/refresh/` | — | Refresh → new pair (rotating, with a 30 s reuse window, see below) |
-| POST | `/api/v1/auth/logout/` | JWT | Blacklist a refresh token |
-| GET/PATCH | `/api/v1/auth/me/` | JWT | Read or update your profile |
+| POST | `/api/v1/auth/signup/` | none | Create an account |
+| POST | `/api/v1/auth/login/` | none | Email + password → access + refresh tokens |
+| POST | `/api/v1/auth/refresh/` | none | New token pair (refresh tokens rotate) |
+| POST | `/api/v1/auth/logout/` | JWT | Blacklist the refresh token |
+| GET / PATCH | `/api/v1/auth/me/` | JWT | Read or update your profile |
 
-### Catalogue (read: any user · write: staff only)
+**Catalogue** (read: any signed-in user · write: staff only)
 
-| Method | Path | Description |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/centres/` | List centres — `?city=&search=&test=&page=&page_size=` |
-| GET | `/api/v1/centres/{id}/` | Centre detail, including its price list |
-| GET | `/api/v1/centres/{id}/tests/` | Tests offered by that centre, with prices |
-| GET | `/api/v1/tests/` | Test catalogue — `?search=&category=` |
-| GET | `/api/v1/offerings/` | **Test-at-a-centre with a price** — `?test=&city=&max_price=&ordering=` |
-| POST/PATCH/DELETE | the above | Staff only (403 otherwise) |
+| GET | `/api/v1/centres/` | Centres. Filters: `?city=` `?search=` `?test=` |
+| GET | `/api/v1/centres/{id}/` | One centre with its price list |
+| GET | `/api/v1/centres/{id}/tests/` | Tests offered by a centre, with prices |
+| GET | `/api/v1/tests/` | Test catalogue. Filters: `?search=` `?category=` |
+| GET | `/api/v1/offerings/` | A test at a centre, with its price. Filters: `?test=` `?city=` `?max_price=` `?ordering=price` |
+| POST / PATCH / DELETE | any of the above | Staff only; patients get 403 |
 
-### Bookings (always scoped to the caller)
+**Bookings** (always limited to the caller's own)
 
-| Method | Path | Description |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/bookings/` | Your bookings — `?status=&from=&to=&ordering=` |
+| GET | `/api/v1/bookings/` | Your bookings. Filters: `?status=` `?from=` `?to=` `?ordering=` |
 | POST | `/api/v1/bookings/` | Book a test |
-| GET | `/api/v1/bookings/{reference}/` | One booking, with its full status history |
+| GET | `/api/v1/bookings/{reference}/` | One booking with its full status history |
 | POST | `/api/v1/bookings/{reference}/cancel/` | Cancel it |
 
-### Payments
+**Payments**
 
-| Method | Path | Auth | Description |
+| Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| POST | `/api/v1/payments/` | JWT | Simulated charge. Honours `Idempotency-Key` |
-| GET | `/api/v1/payments/` | JWT | Your payments — `?status=&booking=` |
+| POST | `/api/v1/payments/` | JWT | Pay for a booking (simulated). Honours an `Idempotency-Key` header |
+| GET | `/api/v1/payments/` | JWT | Your payments. Filters: `?status=` `?booking=` |
 | GET | `/api/v1/payments/{reference}/` | JWT | One payment |
-| POST | `/api/v1/payments/webhook/` | HMAC signature | Provider callback — **idempotent** |
+| POST | `/api/v1/payments/webhook/` | HMAC signature | Payment-status callback from the provider. **Idempotent** |
 
-`POST /payments/` also accepts `"outcome": "pending"`: the provider accepts the
-charge and settles it later by webhook (the asynchronous flow real UPI and
-3-D Secure payments use). Try it with the webhook demo below. The tight
-`payments` rate limit applies only to creating payments, so a page re-checking
-payment status can't lock a patient out of paying.
+**Ops:** `GET /health/` (database + cache check) · `GET /api/v1/config/`
+(non-secret settings for the web app).
 
-### Ops
+All lists are paginated: `{count, page, pages, page_size, next, previous,
+results}`, with `?page=` and `?page_size=` (max 100).
 
-`GET /health/` (database + cache probe), `GET /api/v1/config/` (non-secret client
-settings), `/api/docs/`, `/api/redoc/`, `/api/schema/`.
+### Example requests
 
-### Error format
+```bash
+BASE=http://localhost:8000
 
-Every error uses one envelope with a stable machine-readable `code`:
+# 1. Log in as the demo patient
+TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login/ \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"patient@example.com","password":"DemoPass123!"}' \
+  | python -c 'import sys,json; print(json.load(sys.stdin)["access"])')
+
+# 2. Where can I get a complete blood count, cheapest first?
+curl -s "$BASE/api/v1/offerings/?test=CBC&ordering=price" -H "Authorization: Bearer $TOKEN"
+
+# 3. Book it (use an offering id from step 2)
+curl -s -X POST $BASE/api/v1/bookings/ \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"offering": 1, "scheduled_for": "2026-10-15T10:00:00+05:30"}'
+# → 201 {"reference": "BKG-…", "status": "PENDING", "amount": "350.00", …}
+
+# 4. Pay. The Idempotency-Key makes a retry safe: replaying it returns
+#    the same payment (200) instead of charging again.
+curl -s -X POST $BASE/payments/ \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-key-1' \
+  -d '{"booking": "BKG-…", "method": "UPI"}'
+# → 201 {"reference": "PAY-…", "status": "SUCCESS", "booking_status": "CONFIRMED"}
+```
+
+The gateway approves most payments and declines some, like a real one
+(`PAYMENT_SUCCESS_RATE`, 80% by default). For predictable results, pass
+`"outcome": "success" | "failure"`, or `"pending"` to leave the payment
+waiting for the webhook, as an asynchronous UPI payment would.
+
+**Watch the webhook ignore duplicates.** Deliver one signed event three times:
+
+```bash
+docker compose exec web python manage.py send_test_webhook --payment PAY-… --times 3
+```
+
+```
+delivery 1/3: HTTP 200 {'duplicate': False, 'status': 'RECEIVED', 'result': 'queued'}
+delivery 2/3: HTTP 200 {'duplicate': True,  'status': 'RECEIVED', 'result': 'already_recorded'}
+delivery 3/3: HTTP 200 {'duplicate': True,  'status': 'RECEIVED', 'result': 'already_recorded'}
+```
+
+One event row is stored (`delivery_count = 3`) and processed exactly once by
+the worker. Add `--print-only` to get a signed `curl` command instead.
+
+### Errors
+
+Every error has the same shape, with a stable machine-readable `code`:
 
 ```json
 {
@@ -234,488 +349,329 @@ Every error uses one envelope with a stable machine-readable `code`:
     "message": "A booking that is CANCELLED cannot become CONFIRMED.",
     "details": { "from": "CANCELLED", "to": "CONFIRMED", "booking": "BKG-3F91A0C2D5" }
   },
-  "request_id": "0f2c8d1a4b..."
+  "request_id": "0f2c8d1a4b…"
 }
 ```
 
-`request_id` is echoed in the `X-Request-ID` response header and stamped on
-every log line for that request.
-
-| Status | When |
+| Status | Meaning |
 | --- | --- |
-| 400 | Payload or query parameter is invalid |
-| 401 | Missing/expired JWT, or a bad webhook signature |
-| 403 | Authenticated but not allowed (e.g. a patient writing to the catalogue) |
-| 404 | Unknown resource — **also** returned for resources owned by someone else |
-| 409 | The resource exists but its state forbids this (already paid, cancelled, duplicate) |
+| 400 | Invalid payload or query parameter |
+| 401 | Missing or expired token, or a bad webhook signature |
+| 403 | Signed in but not allowed (e.g. a patient editing the catalogue) |
+| 404 | Not found. **Also** returned for another user's booking, so the API never confirms it exists |
+| 409 | Valid request, but the current state forbids it (already paid, cancelled, duplicate) |
 | 429 | Rate limited |
 
----
-
-## Walk through the whole flow (copy-paste)
-
-```bash
-BASE=http://localhost:8000
-
-# 1. Log in as the seeded patient
-TOKEN=$(curl -s -X POST $BASE/api/v1/auth/login/ \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"patient@example.com","password":"DemoPass123!"}' \
-  | python -c 'import sys,json; print(json.load(sys.stdin)["access"])')
-
-# 2. Find the cheapest centre offering a complete blood count
-curl -s "$BASE/api/v1/offerings/?test=CBC&ordering=price" -H "Authorization: Bearer $TOKEN"
-
-# 3. Book it (use an offering id from the previous response)
-curl -s -X POST $BASE/api/v1/bookings/ \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"offering": 1, "scheduled_for": "2026-10-15T10:00:00+05:30"}'
-# → {"reference":"BKG-...","status":"PENDING","amount":"350.00", ...}
-
-# 4. Pay for it. `outcome` forces the simulated result; omit it for random.
-curl -s -X POST $BASE/payments/ \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-key-1' \
-  -d '{"booking":"BKG-...","method":"UPI","outcome":"success"}'
-# → 201 {"reference":"PAY-...","status":"SUCCESS","booking_status":"CONFIRMED"}
-
-# Replaying the same Idempotency-Key returns 200 and the SAME payment.
-```
-
-### See the webhook idempotency for yourself
-
-```bash
-docker compose exec web python manage.py send_test_webhook --payment PAY-XXXXXXXX --times 3
-```
-
-Real output from the docker-compose stack:
-
-```
-delivery 1/3: HTTP 200 {'received': True, 'duplicate': False, 'status': 'RECEIVED', 'result': 'queued'}
-delivery 2/3: HTTP 200 {'received': True, 'duplicate': True,  'status': 'RECEIVED', 'result': 'already_recorded'}
-delivery 3/3: HTTP 200 {'received': True, 'duplicate': True,  'status': 'RECEIVED', 'result': 'already_recorded'}
-```
-
-The first delivery is stored and queued for the Celery worker. The next two
-are recognised as duplicates on arrival, before the worker has even run. A
-moment later the one stored event is `PROCESSED` with result
-`already_success`: the charge had already settled synchronously, so the
-webhook confirmed it without a second transition. That makes one
-`WebhookEvent` row, one `Payment` row and one booking transition. Without a
-broker (plain `runserver`) the event is processed inline, so delivery 1
-reports `already_success` directly.
-
-Add `--print-only` to get a signed `curl` command instead of sending.
+The `request_id` also comes back in the `X-Request-ID` header and appears on
+every log line for that request, so one ID traces a request end to end.
 
 ---
 
-## Database design
+## 4. Database design
 
 ```mermaid
 erDiagram
     USER ||--o{ BOOKING : places
     DIAGNOSTIC_CENTRE ||--o{ CENTRE_TEST : offers
-    DIAGNOSTIC_TEST   ||--o{ CENTRE_TEST : "is offered as"
-    CENTRE_TEST ||--o{ BOOKING : "is booked as"
-    BOOKING ||--o{ PAYMENT : "is paid by"
+    DIAGNOSTIC_TEST ||--o{ CENTRE_TEST : "offered as"
+    CENTRE_TEST ||--o{ BOOKING : "booked as"
+    BOOKING ||--o{ PAYMENT : "paid by"
     BOOKING ||--o{ BOOKING_STATUS_CHANGE : "audited by"
     PAYMENT ||--o{ WEBHOOK_EVENT : "settled by"
+
+    CENTRE_TEST {
+        decimal price
+        bool is_available
+    }
+    BOOKING {
+        string reference UK
+        datetime scheduled_for
+        decimal amount "snapshot of price"
+        string status
+    }
+    PAYMENT {
+        string reference UK
+        string status
+        string idempotency_key UK
+        string provider_reference UK
+    }
+    WEBHOOK_EVENT {
+        string event_id UK
+        string status
+        int delivery_count
+    }
 ```
 
-| Table | Purpose |
+| Table | Holds |
 | --- | --- |
-| `users` | Email-as-username. Deactivated, never deleted (`PROTECT` from bookings). |
+| `users` | Email-based accounts. Deactivated, never deleted, so financial history stays intact. |
 | `diagnostic_centres` | Name, address, city, pincode, opening hours, active flag. |
-| `diagnostic_tests` | Master catalogue: code, name, category, prep, report ETA. |
-| `centre_tests` | **The join that carries the price.** Unique on `(centre, test)`. |
-| `bookings` | Patient, offering, slot, **amount snapshot**, status, audit timestamps. |
-| `booking_status_changes` | Append-only log of every transition and what caused it. |
-| `payments` | Amount, status, method, provider ref, idempotency key, raw payload. |
-| `webhook_events` | Every inbound delivery, stored before it is acted on; `delivery_count` records redeliveries without reprocessing them. |
+| `diagnostic_tests` | Master catalogue: code, name, category, preparation, report time. |
+| `centre_tests` | **A test at a centre, with that centre's price.** Unique per `(centre, test)`. |
+| `bookings` | Patient, offering, appointment time, **amount snapshot**, status. |
+| `booking_status_changes` | Append-only audit trail: every transition and what caused it. |
+| `payments` | Amount, status, method, provider reference, idempotency key, raw provider payload. |
+| `webhook_events` | Every webhook received, saved before processing; `delivery_count` counts redeliveries. |
 
-### Three decisions worth defending
+`webhook_events` finds its payment through the provider's reference rather
+than a foreign key, because a provider can send an event about a payment we
+have never seen. That event must still be stored (and marked `IGNORED`), not
+rejected by the database.
 
-**1. Price lives on `centre_tests`, not on `diagnostic_tests`.**
-A CBC is ₹299 in Koramangala and ₹420 in Andheri. A `price` column on the test
-would be wrong the moment a second centre exists. The booking references the
-offering, so it carries both the centre and the test through one foreign key
-with no denormalised fields that can drift.
+### Design decisions
 
-**2. `bookings.amount` is a snapshot, not a lookup.**
-Copied from `centre_tests.price` at creation. Repricing an offering must never
-retroactively change what a patient agreed to pay. There is a test for exactly
-this.
+**Price belongs to the centre↔test pair.** A CBC costs ₹299 at one centre and
+₹420 at another, so a single `price` column on the test would be wrong as
+soon as a second centre exists. A booking points at the offering, which gives
+it the centre and the test through one foreign key.
 
-**3. Correctness is enforced in the schema, not only in Python.**
-Application checks lose races; unique indexes do not.
+**A booking's amount is a snapshot.** It's copied from the price at booking
+time. Repricing a test later must never change what a patient already agreed
+to pay, and a test checks exactly that.
 
-| Constraint | What it prevents |
+**Public IDs are opaque.** Bookings and payments are exposed as `BKG-…` and
+`PAY-…` references, never sequential integers, so records can't be
+enumerated by guessing IDs.
+
+**Invariants are database constraints:**
+
+| Constraint | Prevents |
 | --- | --- |
-| `uniq_test_per_centre` on `(centre, test)` | Two prices for the same test at one centre |
-| `uniq_active_booking_per_slot` — partial, `status IN (PENDING, CONFIRMED)` | Double-booking a slot, while still allowing a cancelled slot to be rebooked |
-| `uniq_open_payment_per_booking` — partial, `status IN (PENDING, SUCCESS)` | Double-charging, while still allowing a retry after a decline |
-| `uniq_payment_idempotency_key` — partial, `WHERE key IS NOT NULL` | A retried `POST /payments/` charging twice |
-| `webhook_events.event_id` unique | A redelivered webhook being processed twice |
-| `payment_amount_positive`, `booking_amount_non_negative` | Nonsensical money |
-| `PROTECT` on booking → user / offering | Deleting a row that financial records depend on |
+| Unique `(centre, test)` | Two prices for one test at one centre |
+| Partial unique `(user, offering, time)` while `PENDING` or `CONFIRMED` | Double-booking a slot, while still allowing a cancelled slot to be rebooked |
+| Partial unique `(booking)` while payment is `PENDING` or `SUCCESS` | Charging a booking twice, while still allowing a retry after a decline |
+| Unique `idempotency_key` | A retried `POST /payments/` creating a second charge |
+| Unique `webhook_events.event_id` | Processing a redelivered webhook twice |
+| Check `amount > 0` / `amount ≥ 0` | Nonsensical money |
+| `PROTECT` on booking → user / offering | Deleting rows that financial records depend on |
 
-Indexes back the queries that exist: `(user, status)` and `(status, scheduled_for)`
-on bookings, `(test, price)` on offerings, `(booking, status)` on payments.
+Indexes match the real queries: `(user, status)` and `(status,
+scheduled_for)` on bookings, `(test, price)` on offerings, `(booking,
+status)` on payments. Money is `DECIMAL(10,2)`, never a float.
 
 ### Booking state machine
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING: booking created
+    [*] --> PENDING: booked
     PENDING --> CONFIRMED: payment succeeded
     PENDING --> FAILED: payment declined
     PENDING --> CANCELLED: patient cancels
     FAILED --> PENDING: new payment attempt
     FAILED --> CANCELLED: patient cancels
-    CONFIRMED --> CANCELLED: cancelled before cutoff
+    CONFIRMED --> CANCELLED: cancelled before the cutoff
     CANCELLED --> [*]
 ```
 
-The table lives in one place, `apps/bookings/services.py::ALLOWED_TRANSITIONS`,
-and every state change goes through `transition_booking()`. A view never
-assigns `booking.status` directly. All sixteen ordered pairs are asserted in
-`tests/test_state_machine.py`.
+The allowed transitions are defined once, in
+`apps/bookings/services.py::ALLOWED_TRANSITIONS`. A move to the status a
+booking already has is a no-op rather than an error, which is what lets a
+repeated webhook pass through safely. All 16 from→to pairs are tested.
 
 ---
 
-## How idempotency is guaranteed
+## 5. Idempotency and reliability
 
-This is the part of the brief that actually matters, so here is the reasoning
-in full.
+*Idempotent* means doing the same thing twice has the same effect as doing
+it once. Payment providers routinely resend webhooks, and clients retry
+requests on timeouts, so this is the core of the brief.
 
-**1. Store first, act second.** The webhook view verifies the signature, then
-inserts a `WebhookEvent` row, and only then processes it. A crash mid-processing
-cannot lose the event; it stays `RECEIVED`/`FAILED` and is picked up by the
-retry task or `manage.py replay_failed_webhooks`.
+**How the webhook stays idempotent**
 
-**2. The duplicate check is a unique index, not an `if`.**
-
-```python
-try:
-    with transaction.atomic():
-        event = WebhookEvent.objects.create(event_id=event_id, ...)
-    return event, True
-except IntegrityError:
-    return WebhookEvent.objects.get(event_id=event_id), False   # duplicate
-```
-
-`filter(...).exists()` followed by `create()` has a window that two simultaneous
-deliveries both pass. Letting the database arbitrate has no such window.
-
-**3. Applying an outcome is idempotent and first-outcome-wins.** Both the
-synchronous charge and the webhook converge on `apply_payment_outcome()`, which
-locks the payment row (`SELECT … FOR UPDATE`) and then:
-
-| Situation | Behaviour |
+| Mechanism | What it guarantees |
 | --- | --- |
-| Payment already has this status | No-op, returns `already_success` / `already_failed` |
-| Payment already terminal, event asserts the other outcome | **Refused** and logged at WARNING; a settled payment never flips |
-| Event asserts a non-terminal status | Ignored |
-| Otherwise | Settle the payment, then transition the booking |
+| **Unique `event_id`** | A redelivered event fails the insert and is answered `200 {duplicate: true}`. The database arbitrates, so two simultaneous deliveries can't both slip through, which a "check then insert" in Python would allow. |
+| **Row lock on the payment** (`SELECT … FOR UPDATE`) | Two events about the same payment are applied one after the other, never interleaved. |
+| **First outcome wins** | Repeating the current outcome is a no-op. A contradicting later event (`failed` after `succeeded`) is refused and logged; a paid booking never flips. |
+| **Signed deliveries** | `X-Webhook-Signature: t=<unix>,v1=<HMAC-SHA256>`, compared in constant time and rejected outside a 5-minute window. An unsigned endpoint that confirms bookings would be an open door. |
+| **Right status codes** | Unknown payment, unsupported type or amount mismatch: stored, marked `IGNORED`, answered 200, since retrying can never succeed. Real processing errors: 500, so the provider retries. |
 
-**4. Transitioning to the current status is a no-op, not an error.** That is
-what lets a replay pass through the state machine without raising.
+**How payments stay idempotent:** a client sends an `Idempotency-Key` header.
+Replaying a key returns the original payment instead of charging again. The
+key is checked again *after* the booking row is locked, so parallel retries
+with the same key all get the same payment back.
 
-**5. Unprocessable ≠ retryable.** An unknown payment, an unsupported event type
-or an amount mismatch is stored, marked `IGNORED` and answered **200** — a 4xx
-would make the provider retry something that can never succeed. Genuine
-processing errors return **500**, which is the signal to retry.
+**Retries:** webhook processing runs on Celery with exponential backoff (10s,
+20s, 40s…, up to 5 attempts). Recording the failure is best-effort, so a
+database outage, the most common transient failure, can't cancel the retry.
+`replay_failed_webhooks` and `reconcile_payments` cover anything left behind.
 
-**6. `POST /payments/` is idempotent too**, via the `Idempotency-Key` header.
-Replaying a key returns the original payment with 200 instead of 201, and never
-charges again.
+**Verified under real conditions**, not only in unit tests:
 
-**Proof.** `tests/test_webhooks.py` delivers one event five times and asserts:
-exactly one `WebhookEvent`, exactly one `Payment`, exactly one
-`PENDING → CONFIRMED` transition. It also covers two distinct events asserting
-the same outcome, a contradictory late event, and a success arriving *after* the
-patient cancelled.
-
-### Proven under real concurrency and a real outage
-
-The tests above prove the constraints exist. `tests/test_concurrency.py`
-proves they hold when requests genuinely collide. Each scenario releases 8
-threads, each with its own Postgres connection, at the same instant:
-
-| Scenario | Result |
+| Scenario (8 parallel requests on PostgreSQL) | Result |
 | --- | --- |
-| One webhook event delivered 8× in parallel | 1 processed, 7 duplicates, 1 booking transition |
-| 8 different events asserting the same outcome | 8 events stored, booking moves once |
-| Success and failure events racing | Exactly one wins; booking always agrees with the payment |
-| 8 parallel charges for one booking | 1 × 201, 7 × 409, one payment row |
-| 8 parallel retries with one `Idempotency-Key` | One payment; every caller gets it back (1 × 201, 7 × 200) |
-| 8 parallel bookings of one slot | 1 × 201, 7 × 409 |
+| One webhook event delivered 8× at once | Processed once, 7 duplicates, `delivery_count = 8` |
+| 8 different events with the same outcome | Booking moves once |
+| `succeeded` and `failed` events racing | Exactly one wins; booking always matches the payment |
+| 8 simultaneous charges for one booking | 1 succeeds, 7 rejected, one payment row |
+| 8 retries with one `Idempotency-Key` | One payment; all 8 callers get it back |
+| 8 simultaneous bookings of one slot | 1 succeeds, 7 rejected |
 
-These run in CI on Postgres, and they are skipped on SQLite, which
-serialises writes and would pass without proving anything. They also found
-a bug. The `Idempotency-Key` was checked *before* taking the booking lock, so
-retries that waited on the lock got a 409 instead of the original payment.
-No money moved twice, but the idempotency contract was broken. The key is now
-re-checked under the lock.
+The full Docker stack was also run with a **deliberate database outage**
+while a webhook was being processed. The attempt failed, a retry was
+scheduled, and it confirmed the booking seconds after the database came back.
 
-The full `docker compose` stack (Postgres, Redis, API, Celery worker) was
-also driven over HTTP, including a deliberate database outage. A webhook
-was queued, the database was stopped, and the worker was released into the
-outage. The attempt failed, a retry was scheduled with backoff, and the
-retry confirmed the booking seconds after the database returned. Getting
-there exposed two more real problems, both fixed:
-
-- **A DB outage killed the retry.** The task recorded the failure in the
-  database *before* scheduling the retry, so when the database was the thing
-  that was down, that bookkeeping raised and no retry was ever scheduled.
-  Recording is now best-effort and the retry always goes ahead (unit-tested).
-- **A dead worker stayed dead.** The worker exits if Postgres isn't reachable
-  at startup, and compose had no restart policy. Queued webhooks weren't
-  lost, because they sit in Redis and were processed the moment a worker came
-  back, but nothing brought one back. Every service now has
-  `restart: unless-stopped`.
-
-### Webhook signature
-
-Deliveries are signed `X-Webhook-Signature: t=<unix>,v1=<hmac-sha256 of "<t>.<body>">`
-with a shared secret, verified with `hmac.compare_digest`, and rejected outside a
-300-second window. An unauthenticated public endpoint that flips bookings to
-CONFIRMED is otherwise an open door. Set `PAYMENT_WEBHOOK_REQUIRE_SIGNATURE=false`
-to poke at it by hand.
+Testing like this found and fixed real bugs, each now covered by a test: an
+`Idempotency-Key` that wasn't re-checked under the lock, a retry cancelled by
+the outage it was meant to survive, a missing container restart policy, and a
+refresh-token rotation race that logged users out on reload. That one is
+fixed with a 30-second reuse window (`JWT_REFRESH_REUSE_SECONDS`).
 
 ---
 
-### Refresh-token rotation, and a bug found by using the app
+## 6. Edge cases
 
-Refresh tokens rotate: each use returns a new pair and blacklists the old
-token. Clicking through the frontend exposed the classic race this creates.
-A page reloaded while a refresh was in flight: the server rotated the token,
-but the response never arrived (the server logged a broken pipe). The
-reloaded page then presented the old, now-blacklisted token and the patient
-was logged out. Two tabs refreshing at once fail the same way.
+Every item below has at least one test.
 
-The fix is a short **reuse window** (`JWT_REFRESH_REUSE_SECONDS`, default
-30). A token presented again within the window of being rotated gets back
-the pair it was already rotated to, instead of a 401. Outside the window,
-reuse is rejected as before. This is the "reuse interval" trade-off identity
-providers make: a replay inside a few seconds gets nothing the legitimate
-client didn't already receive. Both behaviours are tested, and the browser
-client also adopts tokens another tab has saved. The window relies on a
-shared cache (Redis under docker-compose) to hold across gunicorn workers.
-
----
-
-## Edge cases handled
-
-Each of these has at least one test.
-
-**Auth** — duplicate email (case-insensitively); weak, mismatched or missing
-passwords; malformed email or phone; wrong password, unknown email and
-deactivated account all 401; a forged JWT; a blacklisted refresh token; a
-patient trying to set `is_staff` on themselves; every invalid signup field
-reported in one response; a page reloading mid-refresh (see below).
-
-**Booking** — appointment in the past, inside the 30-minute lead window, beyond
-the 90-day horizon, or outside the centre's opening hours; an offering that is
-unavailable or whose centre is deactivated; a centre that does not offer the
-requested test; double-booking the same slot (rejected) while two *different*
-patients booking it is fine; rebooking a slot that was cancelled; unparseable
-datetimes and unknown status filters.
-
-**Payment** — unknown booking reference (404); another patient's booking (404,
-not 403 — the API never confirms it exists); paying a cancelled booking (409);
-paying an already-confirmed booking (409); a second charge while one is in
-flight (409); retrying after a decline (allowed); an `Idempotency-Key` reused
-for a different booking (409); a payment stuck in PENDING (swept by
-`reconcile_payments`).
-
-**Webhook** — unsigned, wrongly signed, tampered-body and stale-timestamp
-deliveries (401); non-JSON and non-object bodies, missing `id`/`type` (400);
-unknown payment, unsupported event type, amount mismatch (200 + `IGNORED`);
-the same event five times; two events asserting the same outcome; a
-contradictory later event; a success landing after cancellation (payment
-recorded, booking left cancelled, `refund_required` logged); a processing
-failure (500, stored, replayable).
-
-**Authorisation** — every booking and payment queryset is filtered by
-`request.user` *before* lookup, so another user's reference is a 404. Catalogue
-writes are staff-only. `?include_inactive=true` is rejected for non-staff
-rather than silently ignored, so a cached response can never reach the wrong
-audience.
+- **Auth:** duplicate email (case-insensitive) · weak, mismatched or missing
+  passwords · malformed email or phone · wrong password, unknown email,
+  deactivated account → 401 · forged JWT · blacklisted refresh token · a user
+  trying to make themselves staff · all invalid signup fields reported in one
+  response.
+- **Bookings:** time in the past, inside the 30-minute lead window, beyond 90
+  days, or outside opening hours · unavailable offering or deactivated centre ·
+  a centre that doesn't offer the test · double-booking one slot (rejected),
+  while two *different* patients may book it · rebooking a cancelled slot ·
+  unparseable dates and unknown filters.
+- **Payments:** unknown booking (404) · another user's booking (404, not 403) ·
+  paying a cancelled booking (409) · paying twice (409) · a second charge while
+  one is in progress (409) · retry after a decline (allowed) · an
+  `Idempotency-Key` reused for another booking (409) · payments stuck pending
+  (swept by `reconcile_payments`).
+- **Webhooks:** unsigned, wrongly signed, tampered or stale (401) · non-JSON
+  body or missing `id` / `type` (400) · unknown payment, unsupported type,
+  amount mismatch (200, ignored) · the same event 5× · a contradicting late
+  event · a success arriving after cancellation (recorded, booking stays
+  cancelled, refund flagged) · processing failure (500, stored, retried).
+- **Authorisation:** every booking and payment query is filtered by the
+  signed-in user *before* lookup · catalogue writes are staff-only.
 
 ---
 
-## Project layout
-
-```
-config/            settings (+ settings_test), urls, celery, env parsing
-apps/
-  common/          error envelope, JSON logging, request-id middleware,
-                   pagination, permissions, row-locking helper, health
-  accounts/        email-based user, signup/login/refresh/logout/me
-  catalog/         centres, tests, offerings; read caching + invalidation
-  bookings/        Booking + audit trail; state machine in services.py
-  payments/        Payment, WebhookEvent, simulated gateway, HMAC signing,
-                   idempotent settlement, Celery tasks, ops commands
-frontend/          single-page web app (index.html + static/app/{app.js,styles.css})
-tests/             226 tests
-docker/            entrypoint (wait for db → migrate → seed → run)
-```
-
-Views are thin: authenticate, deserialise, call a service. All business rules
-live in `apps/*/services.py`, which is why the same logic can be driven by an
-HTTP request, a Celery task or a management command without duplication.
-
-### Management commands
-
-| Command | Purpose |
-| --- | --- |
-| `seed_catalog` | 4 centres, 9 tests, 26 priced offerings, 2 demo users. Idempotent. |
-| `send_test_webhook --payment PAY-… --times 3` | Deliver a signed webhook N times |
-| `replay_failed_webhooks [--dry-run]` | Re-process failed/unhandled events |
-| `reconcile_payments --older-than-minutes 30` | Fail payments stuck in PENDING |
-
-### Bonus engineering included
-
-Redis caching (version-keyed catalogue reads, invalidated by signals, `X-Cache`
-header) · Celery worker with retry + backoff for webhook processing · Docker and
-docker-compose with healthchecks and a non-root image · OpenAPI/Swagger ·
-226 tests at 94% coverage · structured JSON logging with request-id correlation ·
-pagination on every list · scoped rate limiting (login, payments, webhook) ·
-webhook retry handling and a reconciliation sweeper · a health endpoint · Django
-admin for back-office · GitHub Actions CI running the suite against Postgres.
-
----
-
-## Tests
+## 7. Testing
 
 ```bash
-pytest                                  # in-memory SQLite: 220 run, 6 concurrency tests skip
-pytest --cov --cov-report=term-missing  # 94% coverage
-DATABASE_URL=postgresql://… pytest      # all 226, including the parallel-request tests
+pytest                                     # SQLite: 220 run, 6 PostgreSQL-only tests skip
+pytest --cov --cov-report=term-missing     # 95% coverage
+DATABASE_URL=postgresql://… pytest         # all 226, including the concurrency tests
 ```
 
 | File | Covers |
 | --- | --- |
-| `test_auth.py` | Signup validation, login, refresh, logout/blacklist, profile |
-| `test_catalog.py` | Filtering, per-centre pricing, staff-only writes, caching |
+| `test_auth.py` | Signup validation, login, token refresh and reuse window, logout, profile |
+| `test_catalog.py` | Filters, per-centre pricing, staff-only writes, caching |
 | `test_bookings.py` | Creation, price snapshot, time rules, isolation, cancellation |
-| `test_payments.py` | Success/decline, retries, `Idempotency-Key`, reconciliation |
-| `test_webhooks.py` | Signatures, malformed payloads, **idempotency**, races, retries |
-| `test_state_machine.py` | All 16 transitions + every database constraint |
-| `test_management.py` | Commands and Celery tasks |
-| `test_ops.py` | Health, schema, request-id tracing, throttling, JSON logs |
-| `test_frontend.py` | The app shell at `/`, its static assets, and that it doesn't shadow the API |
-| `test_concurrency.py` | 8 parallel requests per scenario on Postgres: duplicate webhooks, racing outcomes, double charges, same-key retries, same-slot bookings |
-| `test_config.py` | `DATABASE_URL` parsing (incl. the absolute-path regression) and env helpers |
+| `test_payments.py` | Success and decline, retries, `Idempotency-Key`, pending payments, rate-limit scope |
+| `test_webhooks.py` | Signatures, malformed payloads, **duplicates**, races, retries |
+| `test_concurrency.py` | 8 truly parallel requests per scenario (PostgreSQL only) |
+| `test_state_machine.py` | All 16 transitions and every database constraint |
+| `test_management.py` | Management commands and Celery tasks, including a DB outage |
+| `test_ops.py` | Health, OpenAPI schema, request IDs, throttling, JSON logs, config |
+| `test_frontend.py` | The web app shell, its assets, cache-safe asset URLs |
+| `test_config.py` | `DATABASE_URL` parsing and environment helpers |
 
-Tests use real JWTs rather than `force_authenticate`, so the token path is
-exercised on every request.
+Tests authenticate with real JWTs rather than bypassing auth, so the token
+path runs on every request. **CI** (`.github/workflows/ci.yml`) runs the
+whole suite on PostgreSQL, checks for missing migrations, validates the
+OpenAPI schema and builds the Docker image on every push.
 
 ---
 
-## Configuration
+## 8. Configuration
 
-Everything is environment-driven (see `.env.example`). Notable knobs:
+Everything is set through environment variables; see `.env.example`.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DJANGO_DEBUG` | `true` | Local-dev default. Set `false` in any deployment: that switches on secure cookies, HSTS and JSON logs (`manage.py check --deploy` is then clean apart from the two opt-ins below) |
-| `SECURE_SSL_REDIRECT` / `SECURE_HSTS_PRELOAD` | `false` | Opt-in. TLS is normally terminated and redirected at the load balancer; preload is hard to undo |
-| `DATABASE_URL` | `postgresql://eve:eve@localhost:5432/eve_diagnostics` | `postgres://` or `sqlite://` |
-| `REDIS_URL` | *(unset)* | Unset → local-memory cache, so it runs without Redis |
-| `CELERY_BROKER_URL` | `REDIS_URL` | Unset → tasks run inline, still correct |
-| `PAYMENT_DEFAULT_OUTCOME` | `random` | `success` / `failure` / `random` |
-| `PAYMENT_SUCCESS_RATE` | `0.8` | Used when the outcome is random |
-| `PAYMENT_WEBHOOK_SECRET` | `dev-webhook-secret` | HMAC key |
-| `PAYMENT_WEBHOOK_REQUIRE_SIGNATURE` | `true` | Set false to test by hand |
+| `DATABASE_URL` | local PostgreSQL | `postgresql://…` or `sqlite://…` |
+| `REDIS_URL` | unset | Unset → in-memory cache |
+| `CELERY_BROKER_URL` | `REDIS_URL` | Unset → tasks run inline |
+| `DJANGO_DEBUG` | `true` | Set `false` in any deployment: enables secure cookies, HSTS, JSON logs |
+| `DJANGO_SECRET_KEY` | dev value | Also the JWT signing key; use ≥ 32 random bytes |
+| `PAYMENT_SUCCESS_RATE` | `0.8` | Share of payments the simulated gateway approves |
+| `PAYMENT_DEFAULT_OUTCOME` | `random` | `success`, `failure`, `pending` or `random` |
+| `PAYMENT_WEBHOOK_SECRET` | dev value | Shared HMAC secret for webhook signatures |
+| `PAYMENT_WEBHOOK_MAX_RETRIES` | `5` | Webhook retry attempts |
 | `BOOKING_MIN_LEAD_TIME_MINUTES` | `30` | Earliest bookable slot |
 | `BOOKING_MAX_ADVANCE_DAYS` | `90` | Booking horizon |
-| `BOOKING_CANCELLATION_CUTOFF_HOURS` | `2` | Cancellation window for confirmed bookings |
-| `LOG_FORMAT` | `console` in debug, else `json` | Structured logging |
+| `BOOKING_CANCELLATION_CUTOFF_HOURS` | `2` | Confirmed bookings can't be cancelled later than this |
+| `THROTTLE_*` | see `settings.py` | Rate limits: anon 60/min, user 240/min, login 10/min, payments 20/min |
 
-The service degrades gracefully: no Redis → local-memory cache; no broker →
-inline task execution. Behaviour is identical, only the timing differs.
+### Bonus engineering
 
----
+| Bonus item | How |
+| --- | --- |
+| Redis caching | Catalogue reads cached with a version number that every catalogue change bumps; `X-Cache: HIT/MISS` header |
+| Celery / background jobs | Webhook processing, failed-webhook replay, stuck-payment reconciliation |
+| Docker & compose | Non-root image; `db`, `redis`, `web`, `worker` with health checks and restart policies |
+| Swagger / OpenAPI | `/api/docs/`, `/api/redoc/`, `/api/schema/`, 35 documented operations |
+| Tests | 226 tests, 95% coverage, CI on PostgreSQL |
+| Structured logging | JSON lines with a request ID on every record |
+| Pagination | On every list, with a client-controlled, capped page size |
+| Rate limiting | Separate limits for anonymous users, signed-in users, login, payments and the webhook |
+| Webhook retries | Exponential backoff, a replay command, verified against a real DB outage |
 
-## Assumptions
+**Management commands:** `seed_catalog` (demo data, safe to re-run) ·
+`send_test_webhook` · `replay_failed_webhooks` · `reconcile_payments`.
 
-1. **No slot capacity.** A centre is not modelled as having N slots per hour;
-   any number of patients may book 10:00. Only *one patient* booking the *same
-   offering* twice at the same time is prevented. Real capacity needs a slot
-   table and is a bigger design than this brief calls for.
-2. **The payment outcome is controllable through the API, not the UI.**
-   `"outcome": "success" | "failure" | "pending"` forces the result; otherwise
-   `PAYMENT_SUCCESS_RATE` decides. The web app never sends it, because a
-   patient doesn't get to choose whether their payment succeeds. Random-only
-   outcomes would make the test suite non-deterministic and make a reviewer
-   retry until the dice cooperate.
-3. **Both settlement paths exist, and the webhook is authoritative.**
-   `POST /payments/` settles synchronously because the brief says the simulated
-   payment should update the booking. A real gateway also calls back, so the
-   webhook re-asserts the outcome — and must be a no-op when it agrees. That
-   overlap is the point of the exercise, not an accident.
-4. **First terminal outcome wins.** A `payment.failed` arriving after a
-   `payment.succeeded` is refused and logged, not applied. Flipping a confirmed
-   booking on a late contradictory event is worse than ignoring it.
-5. **404 rather than 403 for other users' resources**, so the API does not
-   confirm that a booking reference exists.
-6. **Money is `DECIMAL(10,2)` in a single currency (INR).** No floats. No
-   multi-currency, no FX.
-7. **Refunds are out of scope.** A charge that succeeds against a cancelled
-   booking is recorded, the booking stays cancelled, and the case is logged with
-   `requires_refund: true` for an operator. Silently confirming a cancelled
-   appointment would be worse.
-8. **Users are deactivated, never deleted** — `PROTECT` on the booking FK keeps
-   financial history intact.
-9. **Back-office access is the Django admin**, not user-facing API endpoints, so
-   the booking/payment APIs can stay strictly caller-scoped.
-10. **Report delivery, notifications, phlebotomist scheduling and home
-    collection are out of scope.**
+**Web app:** a light-theme single-page app served by Django at `/`, so the
+whole product runs from one container. Browse centres, compare prices,
+book a slot, pay, and follow each booking's lifecycle. It's plain JavaScript
+with no build step, talks to the same documented API, and works on phones.
 
 ---
 
-## What I would do with more time
+## 9. Assumptions
+
+1. **No slot capacity.** Any number of patients can book the same 10:00 slot;
+   only the *same* patient booking the same test twice at once is prevented.
+   Real capacity needs a slots table, a bigger design than the brief calls for.
+2. **Both settlement paths exist, and they agree.** `POST /payments/` settles
+   immediately, as the brief asks. The provider's webhook then confirms the
+   same outcome, and must be a no-op when it agrees. That overlap is
+   deliberate: it's exactly where idempotency matters.
+3. **The first final outcome wins.** A late `failed` after `succeeded` is
+   refused and logged. Flipping a paid booking is worse than ignoring a stale
+   message.
+4. **Payment outcomes are controllable through the API only.** Tests need
+   predictable results; patients don't choose whether a payment succeeds, so
+   the web app never sends `outcome`.
+5. **404, not 403, for other users' records**, so the API never confirms that
+   someone else's booking exists.
+6. **One currency (INR), `DECIMAL(10,2)`.** No floats, no foreign exchange.
+7. **Refunds are out of scope.** A payment that succeeds after the booking was
+   cancelled is recorded, the booking stays cancelled, and a refund is flagged
+   in the logs for an operator.
+8. **Users are deactivated, never deleted**, to keep financial history.
+9. **Back-office work uses the Django admin**, so the patient APIs stay
+   strictly limited to the caller's own data.
+10. **Out of scope:** reports, notifications, home sample collection.
+
+---
+
+## 10. What I would improve with more time
 
 **Correctness and scale**
-- **Slot capacity and availability**, with a `Slot` table and `SELECT … FOR
-  UPDATE SKIP LOCKED` to hand out concurrent bookings safely.
-- **Outbox pattern** for anything we send outward, so a webhook we *emit* has
-  the same delivery guarantees as the ones we receive.
-- **Load testing** (k6 or Locust). The concurrency tests prove correctness
-  under 8-way contention, not throughput or latency under sustained load.
-- **Provider reconciliation**: `reconcile_payments` currently fails a stuck
-  payment after a timeout. It should first re-query the provider and only give
-  up if the provider also has no record.
-- **Refund flow** for the cancelled-but-charged case, instead of only logging it.
+- Real slot capacity, with a slots table and `SELECT … FOR UPDATE SKIP LOCKED`.
+- A refund flow for payments that succeed after cancellation.
+- Reconciliation that asks the provider before failing a stuck payment.
+- An outbox table, so outgoing events get the same guarantees as incoming ones.
+- Load testing (k6 or Locust): the concurrency tests prove correctness, not
+  throughput.
 
-**Operability**
-- Sentry, plus Prometheus metrics for payment success rate, webhook duplicate
-  rate and settlement latency — the three numbers that tell you this service is
-  sick before a customer does.
-- OpenTelemetry tracing across web → worker (the request-id groundwork is there).
-- Celery Beat schedules for `reconcile_payments` and `replay_failed_webhooks`
-  rather than running them by hand.
+**Operations**
+- Sentry, plus metrics for payment success rate, webhook duplicate rate and
+  settlement latency.
+- Celery Beat to run reconciliation and replay on a schedule.
+- Tracing across web and worker (request IDs already flow through).
 
-**Product and API**
-- Postgres full-text search or trigram indexes for the catalogue; `icontains`
-  will not survive a large test list.
-- Cursor pagination for bookings, which page-number pagination handles badly
-  when rows are inserted while a client is paging.
-- Idempotency keys on booking creation too, not just payments.
-- A soft "reservation hold" so a slot is not lost while payment is in flight.
+**API and product**
+- A real payment gateway (Razorpay), behind the existing `charge()` interface.
+- Full-text search for the catalogue, and cursor pagination for bookings.
+- Idempotency keys on booking creation as well as payments.
 
-**Frontend**
-- Move tokens from `localStorage` to httpOnly, SameSite cookies with CSRF
-  protection, so an XSS bug could not read a session.
-- Browser tests (Playwright) for the book-and-pay flow, and a real bundler
-  with TypeScript once the client grows past a demo.
-
-**Engineering hygiene**
-- Extend CI beyond the current workflow (`.github/workflows/ci.yml` already runs
-  the suite against Postgres, checks for migration drift, builds the schema and
-  builds the image) with `ruff`, a coverage gate and a published image.
-- `mypy --strict` on the services layer.
-- Split `settings.py` into `base/dev/prod` once there is a real deployment
-  target; a single env-driven module is honest at this size.
+**Code quality**
+- `ruff`, a coverage gate and `mypy --strict` on the services layer in CI.
+- Split settings into `base / dev / prod` once there is a real deployment.
+- Move web-app tokens from `localStorage` to httpOnly cookies, and add
+  browser tests (Playwright) for the booking flow.
